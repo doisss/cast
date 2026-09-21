@@ -1,0 +1,9 @@
+# strict profile: everything on, fail fast
+engines_image: [trivy, grype, dockle]
+engines_container: [trivy, grype]
+engines_dockerfile: [dockle]
+engines_fs: [trivy, grype]
+run_cast_checks: true
+fail_on_critical: 1
+fail_on_high: 1
+fail_score: 40.0

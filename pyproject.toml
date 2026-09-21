@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sarbar"
+version = "0.1.0"
+description = "CAST — Container Automated Security Testing: orchestrator + policy + report over existing scanners"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "sarbar" }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+sarbar = "sarbar.cli:main"
+cast = "sarbar.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["sarbar*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

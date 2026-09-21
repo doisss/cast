@@ -1,0 +1,9 @@
+# offline profile: no external engines, only cast-checks (air-gap / exam demo)
+engines_image: []
+engines_container: []
+engines_dockerfile: []
+engines_fs: []
+run_cast_checks: true
+fail_on_critical: 1
+fail_on_high: -1
+fail_score: 80.0

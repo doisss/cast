@@ -1,0 +1,108 @@
+Metadata-Version: 2.4
+Name: sarbar
+Version: 0.1.0
+Summary: CAST — Container Automated Security Testing: orchestrator + policy + report over existing scanners
+Author: sarbar
+License: MIT
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Provides-Extra: dev
+Requires-Dist: pytest>=7; extra == "dev"
+
+# sarbar — CAST (Container Automated Security Testing)
+
+CLI-утилита для диплома «Система автоматизированного тестирования безопасности контейнерных приложений».
+Оркестратор + политика + отчёт **поверх** существующих сканеров. Мы не пишем «ещё один Trivy».
+
+## Чем это отличается от Trivy / Clair / Anchore / Grype
+
+| Вопрос на защите | Ответ (где в коде) |
+|---|---|
+| Зачем вы, если есть Trivy? | `sarbar` решает другую задачу: **выбор инструмента, склейка результатов, риск, политика**. Сканеры — сменные движки под капотом (`sarbar/engines/`: `trivy.py`-логика в `__init__.py`, `grype`, `dockle`). |
+| Что вашего? | 1) определение цели `target.py`; 2) план сканирования `orchestrator.plan_scan`; 3) единая модель `model.py`; 4) дедупликация/корреляция `normalize.py`; 5) свои проверки `checks/`; 6) композитный score `risk.py`; 7) политика fail/pass `policy.py`; 8) единый отчёт `report.py` (console/json/sarif/html); 9) история `history.py`. |
+| Своя CVE-база? | **Нет.** Запрещено ТЗ. CVE приходят из движков, мы их только нормализуем. |
+| Парсеры всех экосистем? | **Нет.** Это делают Trivy/Grype. |
+| Свой runtime-агент? | **Нет.** Runtime = `docker inspect` + эвристики `checks.check_inspect` (privileged, root, capabilities, docker.sock). Без kernel-модулей. |
+| Два режима? | Да: `auto` (по умолчанию — CAST сама выбирает движки) и агрегатор (`--engine trivy` — движок фиксирован, а модель/риск/политика/отчёт всё равно наши). |
+
+Цитата научрука («Вариант В … применяешь тот инструмент, который необходим; если не подходит — своё решение») реализована буквально: `orchestrator.plan_scan` выбирает движок под тип цели и профиль, а там, где универсальные сканеры слабы (секреты, Dockerfile-гигиена, runtime-конфиг), работают `cast-checks`.
+
+## Установка
+
+```bash
+pip install -e ".[dev]"
+# опционально, для живых сканирований:
+# docker + trivy + grype + dockle (если их нет — работает offline/mock-демо)
+```
+
+## Использование
+
+```bash
+sarbar scan alpine:3.19            # образ -> статический анализ
+sarbar scan abc123def456           # контейнер -> runtime + связь с образом
+sarbar scan ./Dockerfile           # dockerfile -> dockle + свой линт
+sarbar scan ./app                  # каталог -> fs-скан + поиск секретов
+sarbar scan nginx:latest --profile ci
+sarbar pipeline ./app              # CI-режим: exit 1 при нарушении политики
+
+sarbar scan alpine:3.19 --engine trivy --explain   # агрегатор + объяснение плана
+sarbar scan ./app --offline                        # без сети: cast-checks + mock
+sarbar scan ./app --format json -o report.json
+sarbar scan ./app --format sarif -o report.sarif   # для GitHub Code Scanning
+sarbar scan ./app --format html -o report.html
+sarbar history --limit 10
+sarbar engines
+```
+
+Бинарь `cast` — алиас `sarbar` (примеры из ТЗ с `cast scan` работают).
+
+## Архитектура (ядро переживёт добавление web без переписывания)
+
+```
+cli.py          только UX (argparse) -> вызывает orchestrator
+orchestrator    plan_scan / run_scan (выбор движков, порядок, offline)
+target          detect_target (image|container|dockerfile|fs)
+engines/        адаптеры: run() -> list[Finding]; недоступен -> fallback
+checks/         своё: dockerfile-lint, secrets, runtime-inspect
+normalize       dedup (fingerprint) + correlate (image<->runtime)
+risk            composite score + level
+policy          профили default/ci/strict/offline + fail/pass
+report          console/json/sarif/html (один UX для всех движков)
+history         SQLite ~/.sarbar/history.db (будущий web читает её же)
+```
+
+Web сейчас **не делаем** (требование ТЗ), но `history.py` — уже его будущий бэкенд.
+
+## Профили и политика
+
+`policies/*.yaml` (код работает и без PyYAML — встроенный fallback в `policy.py`):
+
+- `default`: тихо, fail при critical>=1 или score>=80
+- `ci`: trivy+grype cross-check, fail при critical>=1, high>=5, score>=60
+- `strict`: всё включено, fail при critical/high>=1, score>=40
+- `offline`: только cast-checks (air-gap, демо на защите без интернета)
+
+Переопределение в CI: `sarbar pipeline ./app --fail-on critical=1,high=5,score=60`.
+
+## Risk score (методика для диплома)
+
+`risk.py`: `score = min(100, severity_points + cvss_lift + category_penalty)`,
+веса CRITICAL=25, HIGH=10, MEDIUM=3, LOW=1 с затуханием `w/sqrt(n)` + кап на класс,
+`cvss_lift = min(15, max_cvss*1.5)`, `+5` за утёкший секрет, `+5` за runtime-проблему.
+Уровни: >=80 critical, >=60 high, >=30 medium, >=5 low, иначе ok.
+
+## Демо на защите без интернета
+
+```bash
+sarbar scan ./examples/vuln-app --offline --explain
+pytest -q
+```
+
+`--offline` гарантирует воспроизводимость: движки-бины не вызываются,
+результат строится из `cast-checks` + помеченного `mock`-фолбэка (`offline=True` в отчёте).
+
+## Тесты
+
+```bash
+pytest -q
+```
