@@ -12,6 +12,10 @@ license = { text = "MIT" }
 authors = [{ name = "sarbar" }]
 dependencies = []
 
+[project.urls]
+Homepage = "https://github.com/doisss/cast"
+Repository = "https://github.com/doisss/cast.git"
+
 [project.optional-dependencies]
 dev = ["pytest>=7"]
 
