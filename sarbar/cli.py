@@ -14,9 +14,25 @@ from sarbar.policy import BUILTIN_PROFILES, load_profile
 from sarbar.target import detect_target
 
 
+EXAMPLES = """examples:
+  sarbar scan alpine:3.19            scan an image (static analysis)
+  sarbar scan abc123def456           scan a running container (runtime + image link)
+  sarbar scan ./Dockerfile           lint a Dockerfile (+ dockle if installed)
+  sarbar scan ./app                  scan a directory (fs vulns + secret search)
+  sarbar scan nginx:latest --profile ci
+  sarbar pipeline ./app              CI shortcut: exit 1 when policy fails
+  sarbar scan ./app --engine trivy --explain
+  sarbar scan ./app --offline        no network: builtin checks + marked mock data
+  sarbar history --limit 10
+  sarbar engines
+"""
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="sarbar",
-                                description="CAST — Container Automated Security Testing (orchestrator + policy + report)")
+                                description="CAST — Container Automated Security Testing (orchestrator + policy + report)",
+                                epilog=EXAMPLES,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"sarbar {__version__}")
     sub = p.add_subparsers(dest="cmd", required=True)
 
@@ -36,10 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
         sp.add_argument("--fail-on", default=None,
                         help="override policy, e.g. 'critical=1,high=5,score=60' (for CI)")
 
-    s = sub.add_parser("scan", help="scan an image, container, Dockerfile or directory")
+    s = sub.add_parser("scan", help="scan an image, container, Dockerfile or directory",
+                       epilog=EXAMPLES,
+                       formatter_class=argparse.RawDescriptionHelpFormatter)
     add_scan(s)
     # `cast scan ...` compat: binary alias handles it; keep `pipeline` as CI shortcut
-    pl = sub.add_parser("pipeline", help="CI shortcut: scan fs dir / Dockerfile, exit 1 on policy fail")
+    pl = sub.add_parser("pipeline", help="CI shortcut: scan fs dir / Dockerfile, exit 1 on policy fail",
+                        epilog=EXAMPLES,
+                        formatter_class=argparse.RawDescriptionHelpFormatter)
     add_scan(pl)
 
     h = sub.add_parser("history", help="show local scan history")
@@ -69,7 +89,14 @@ def _apply_fail_on(pol, spec: str | None):
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = build_parser().parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    parser = build_parser()
+    if not argv:
+        # bare `sarbar`: show full help instead of a one-line argparse error
+        parser.print_help()
+        return 2
+    args = parser.parse_args(argv)
 
     if args.cmd == "history":
         for r in hist.list_runs(args.limit):
