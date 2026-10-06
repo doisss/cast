@@ -1,0 +1,13 @@
+# offline profile: scanner list emptied on purpose; useful for testing the
+# reporting path with no scanner installed.
+# fail_on_degraded is false here on purpose: having no external scanner is the
+# declared intent of this profile, not a degradation to be punished.
+engines_image: []
+engines_container: []
+engines_dockerfile: []
+engines_fs: []
+fail_on_critical: 1
+fail_on_high: -1
+fail_on_secret: 1
+fail_score: 80.0
+fail_on_degraded: false

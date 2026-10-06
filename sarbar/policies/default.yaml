@@ -1,0 +1,19 @@
+# default profile: minimal noise on an interactive scan.
+#
+# Every threshold here is also embedded in sarbar/policy.py (BUILTIN_PROFILES);
+# this file is the editable overlay that ships inside the package.
+#
+# falco is deliberately absent from this profile. It observes live behaviour
+# through an eBPF or kernel-module driver, which needs root, so on a normal
+# machine it can only report that it saw nothing. Use the ci or strict profile
+# when you mean to use it.
+engines_image: [trivy]
+engines_container: [trivy]
+engines_dockerfile: [trivy]
+engines_fs: [trivy]
+
+fail_on_critical: 1
+fail_on_high: -1          # -1 = never
+fail_on_secret: 1         # a leaked credential always fails
+fail_score: 80.0
+fail_on_degraded: true    # never pass a run where no scanner worked

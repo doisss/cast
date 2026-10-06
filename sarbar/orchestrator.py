@@ -1,14 +1,29 @@
-"""Orchestrator: intelligent engine selection + run. THE diploma core.
+"""Orchestrator: scanner selection, execution, and honest degradation.
 
-auto mode:
-  image      -> vuln engines (trivy/grype per profile) + dockle misconfig + cast-checks
-  container  -> resolve image via `docker inspect`, scan image + runtime cast-checks
-  dockerfile -> dockle (if present) + OUR dockerfile lint (always, offline-capable)
-  fs         -> trivy fs/grype dir + OUR secret scan (always)
+auto mode (scanners chosen by the profile):
+  image      -> vulnerability scanners (trivy / grype) for the image
+  container  -> resolve the image via `docker inspect` and scan that image,
+               plus falco for live behaviour when the profile asks for it
+  dockerfile -> trivy config; dockle only as a second opinion in `strict`,
+               and its absence is a diagnostic, not a degradation, because
+               trivy config already covers the ground
+  fs         -> trivy fs / grype dir (vulnerabilities + misconfig + secrets)
 
-aggregator mode (--engine X): run exactly that engine, but normalization,
-dedup, cast-checks (unless --no-cast-checks), risk score, policy and report
-stay OURS.
+aggregator mode (--engine X): run exactly that scanner; normalisation, dedup,
+risk score, policy and report stay ours.
+
+There are no checks of our own. Every finding in a report comes from a scanner.
+That is a deliberate decision: trivy already lints Dockerfiles and searches for
+secrets, and duplicating those rules in Python only creates a second opinion
+that can disagree with the first.
+
+Design rules enforced here (SPEC.md section 3):
+  I-1  A scanner that did not succeed must never contribute to a PASS verdict.
+  I-4  A scanner binary is executed by absolute path.
+  I-5  An unresolvable target is an error, not an empty passing report.
+  I-12 Every skipped or failed step is recorded in `diagnostics`.
+  I-13 No fabricated data ever reaches a report.
+  I-15 A scanner is not invoked against a target that does not exist.
 """
 from __future__ import annotations
 
@@ -18,9 +33,8 @@ import shutil
 import subprocess
 
 from sarbar import policy as policy_mod
-from sarbar.checks import check_dockerfile, check_fs_secrets, check_inspect
-from sarbar.engines import ENGINES
-from sarbar.engines.mock import MockEngine
+from sarbar.engines import (ENGINES, STATUS_UNSUPPORTED, EngineResult,
+                            FalcoEngine, TrivyEngine)
 from sarbar.model import Finding
 from sarbar.normalize import normalize_all
 from sarbar.policy import Policy
@@ -28,19 +42,39 @@ from sarbar.risk import apply_policy, score_findings
 from sarbar.target import Target, TargetKind
 
 
+class TargetError(RuntimeError):
+    """Target cannot be resolved. Must surface as a CLI error, never as a PASS."""
+
+
+# --------------------------------------------------------------------------
+# docker
+# --------------------------------------------------------------------------
+
 def list_docker_ids() -> set:
     if shutil.which("docker") is None:
         return set()
     try:
         p = subprocess.run(["docker", "ps", "--format", "{{.ID}} {{.Names}}"],
-                           capture_output=True, text=True, timeout=15)
-        ids: set[str] = set()
-        for line in (p.stdout or "").splitlines():
-            for tok in line.split():
-                ids.add(tok)
-        return ids
-    except Exception:
+                           capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
         return set()
+    if p.returncode != 0:
+        return set()
+    ids: set[str] = set()
+    for line in (p.stdout or "").splitlines():
+        ids.update(line.split())
+    return ids
+
+
+def docker_available() -> bool:
+    if shutil.which("docker") is None:
+        return False
+    try:
+        p = subprocess.run(["docker", "version", "--format", "{{.Server.Version}}"],
+                           capture_output=True, text=True, timeout=20)
+        return p.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def docker_inspect(container: str) -> dict | None:
@@ -53,109 +87,206 @@ def docker_inspect(container: str) -> dict | None:
             return None
         data = json.loads(p.stdout or "[]")
         return data[0] if data else None
-    except Exception:
+    except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
 
 
+# --------------------------------------------------------------------------
+# target resolution (I-5)
+# --------------------------------------------------------------------------
+
+def resolve_container(name_or_id: str) -> tuple[dict | None, str | None]:
+    """Return (inspect_dict, image_ref). Raises TargetError when unresolvable."""
+    if not docker_available():
+        raise TargetError(
+            f"cannot resolve container '{name_or_id}': docker is not usable "
+            "(binary missing or the daemon socket is not accessible). Scan the "
+            "image reference directly instead, e.g. `sarbar scan <image>`.")
+    inspect = docker_inspect(name_or_id)
+    if not inspect:
+        raise TargetError(
+            f"container '{name_or_id}' not found. `docker ps` shows nothing with "
+            "this id or name; runtime checks need a running container.")
+    image_ref = (inspect.get("Config") or {}).get("Image")
+    return inspect, image_ref
+
+
+def validate_target(target: Target) -> None:
+    """Raise TargetError when the target provably does not exist."""
+    raw = target.raw
+    if target.kind in (TargetKind.FS, TargetKind.DOCKERFILE):
+        if _looks_like_path(raw) and not _path_exists(raw):
+            raise TargetError(f"path does not exist: {raw}")
+    elif target.kind == TargetKind.CONTAINER:
+        if ":" not in raw and "/" not in raw and not _path_exists(raw):
+            return  # confirmed against docker during the scan
+
+
+def _looks_like_path(raw: str) -> bool:
+    return raw.startswith(("./", "../", "/", "~/")) or "." in raw
+
+
+def _path_exists(raw: str) -> bool:
+    return os.path.exists(os.path.expanduser(raw))
+
+
+# --------------------------------------------------------------------------
+# plan
+# --------------------------------------------------------------------------
+
 def plan_scan(target: Target, pol: Policy, forced_engine: str | None = None) -> dict:
-    """Explainable plan: which engines and why. Shown with --explain."""
-    if forced_engine:
+    """Explainable plan: which scanners and why. Shown with -ex/--explain."""
+    if forced_engine and forced_engine != "none":
         engines = [forced_engine]
-        why = f"aggregator mode: user forced --engine {forced_engine}"
+        why = f"aggregator mode: --engine {forced_engine}"
+    elif forced_engine == "none":
+        engines = []
+        why = "no scanner requested (--engine none)"
     else:
         engines = policy_mod.engines_for(pol, target.kind.value)
-        why = f"auto mode: profile '{pol.name}' selects {engines or ['(none — cast-checks only)']} for {target.kind.value}"
-    checks: list[str] = []
-    if pol.run_cast_checks:
-        checks = {
-            "image": ["image-labels"],
-            "container": ["runtime-inspect"],
-            "dockerfile": ["dockerfile-lint"],
-            "fs": ["secret-scan", "dockerfile-lint(if present)"],
-        }[target.kind.value]
-    return {"engines": engines, "cast_checks": checks, "why": why,
-            "profile": pol.name, "target": target.raw, "kind": target.kind.value}
+        why = (f"auto mode: profile '{pol.name}' selects "
+               f"{engines or ['(none)']} for {target.kind.value}")
+    return {"engines": engines, "why": why, "profile": pol.name,
+            "target": target.raw, "kind": target.kind.value,
+            "offline": bool(pol.offline)}
 
 
-def _run_engine(name: str, scan_ref: str, kind: str, offline: bool) -> tuple[list[Finding], bool]:
-    """Returns (findings, used_fallback)."""
+# --------------------------------------------------------------------------
+# execution
+# --------------------------------------------------------------------------
+
+def _run_engine(name: str, scan_ref: str, kind: str, offline: bool,
+                allow_sudo: bool = True) -> EngineResult:
     eng = ENGINES.get(name)
-    if offline or eng is None or not eng.is_available():
-        return [], True
+    if eng is None:
+        return EngineResult(status="unsupported", detail=f"unknown scanner '{name}'")
+    if not eng.supports or kind not in eng.supports:
+        return EngineResult(status=STATUS_UNSUPPORTED, detail=f"{name} has no {kind} mode")
+    if offline and not getattr(eng, "supports_offline", True):
+        return EngineResult(status="unavailable",
+                            detail=f"{name} cannot work without network")
     try:
-        return eng.run(scan_ref, kind), False
-    except Exception:
-        return [], True
+        try:
+            if isinstance(eng, FalcoEngine):
+                return eng.run(scan_ref, kind, offline=offline,
+                               allow_sudo=allow_sudo)
+            return eng.run(scan_ref, kind, offline=offline)
+        except TypeError:
+            return eng.run(scan_ref, kind)
+    except Exception as ex:  # an adapter must never break the scan
+        return EngineResult(status="failed",
+                            detail=f"{name} raised {type(ex).__name__}: {ex}")
+
+
+def _ensure_offline_database(diagnostics: list) -> bool:
+    """Make sure a local vulnerability database exists before scanning offline.
+
+    Without this, `sarbar offline` on a fresh machine either fails with an
+    obscure scanner error or, worse, silently reports nothing. Downloading the
+    database is the one network operation offline mode is allowed to do.
+    """
+    trivy = ENGINES.get("trivy")
+    if trivy is None:
+        return False
+    if TrivyEngine.db_present():
+        return True
+    diagnostics.append("no local vulnerability database found; fetching it now")
+    ok, detail = trivy.download_db()
+    diagnostics.append(f"database: {detail}")
+    return ok
 
 
 def run_scan(target: Target, pol: Policy, forced_engine: str | None = None,
-             offline: bool = False, use_mock_fallback: bool = True,
-             no_cast_checks: bool = False) -> dict:
+             offline: bool = False, allow_sudo: bool = True,
+             target_error: str | None = None) -> dict:
     plan = plan_scan(target, pol, forced_engine)
     findings: list[Finding] = []
-    engines_used: list[str] = []
-    fallback = False
+    scanners_used: list[str] = []
+    diagnostics: list[str] = []
+    scanner_status: dict[str, str] = {}
     kind = target.kind.value
     scan_ref = target.raw
 
+    if target_error:
+        diagnostics.append(target_error)
+
+    # ---- container resolution (I-5) -------------------------------------
     image_ref = None
-    inspect = None
-    if target.kind == TargetKind.CONTAINER:
-        inspect = docker_inspect(target.raw)
-        if inspect:
-            try:
-                image_ref = inspect.get("Config", {}).get("Image")
-            except Exception:
-                image_ref = None
+    if target.kind == TargetKind.CONTAINER and not target_error:
+        inspect, image_ref = resolve_container(target.raw)
         if image_ref:
             scan_ref = image_ref
+            diagnostics.append(f"container resolved to image {image_ref}")
 
-    for name in plan["engines"]:
-        got, fb = _run_engine(name, scan_ref, "image" if target.kind == TargetKind.CONTAINER else kind, offline)
-        fallback = fallback or fb
-        if not fb:
-            engines_used.append(name)
-            findings.extend(got)
+    # ---- offline pre-flight: the database must exist locally ------------
+    if offline and not target_error and "trivy" in plan["engines"]:
+        _ensure_offline_database(diagnostics)
 
-    # mock fallback keeps demo alive when no binaries/network (flagged offline)
-    if (offline or (not engines_used and use_mock_fallback)) and forced_engine != "none":
-        if target.kind in (TargetKind.IMAGE, TargetKind.CONTAINER, TargetKind.FS, TargetKind.DOCKERFILE):
-            findings.extend(MockEngine().run(scan_ref, kind))
-            engines_used.append("mock")
-            fallback = True
+    # ---- scanners --------------------------------------------------------
+    scan_kind = "image" if target.kind == TargetKind.CONTAINER else kind
+    for name in ([] if target_error else plan["engines"]):
+        # For a container, falco watches the container; the rest scan the image
+        ref = target.raw if (target.kind == TargetKind.CONTAINER and name == "falco") \
+            else scan_ref
+        res = _run_engine(name, ref, scan_kind, offline, allow_sudo)
+        scanner_status[name] = res.status
+        if res.ok:
+            scanners_used.append(name)
+            findings.extend(res.findings)
+            if res.detail:
+                diagnostics.append(f"{name}: {res.detail}")
+        else:
+            diagnostics.append(f"{name} not used [{res.status}]: {res.detail}")
 
-    # OUR checks (always local, work offline)
-    if pol.run_cast_checks and not no_cast_checks:
-        engines_used.append("cast-checks")
-        if target.kind == TargetKind.DOCKERFILE:
-            findings.extend(check_dockerfile(target.raw, target.raw))
-        elif target.kind == TargetKind.FS:
-            findings.extend(check_fs_secrets(target.raw, target.raw))
-            df = os.path.join(target.raw, "Dockerfile")
-            if os.path.isfile(df):
-                findings.extend(check_dockerfile(df, target.raw))
-            elif os.path.isfile(os.path.join(target.raw, "dockerfile")):
-                findings.extend(check_dockerfile(os.path.join(target.raw, "dockerfile"), target.raw))
-        elif target.kind == TargetKind.CONTAINER and inspect:
-            findings.extend(check_inspect(inspect, target.raw))
-        if target.kind == TargetKind.IMAGE and os.path.isfile(str(target.raw)):
-            pass  # archive: engines handle it
-
+    # ---- normalise, score, policy ---------------------------------------
     findings = normalize_all(findings)
     risk = score_findings(findings)
     verdict, reasons = apply_policy(findings, risk, pol)
+
+    # ---- degraded verdict (I-1) -----------------------------------------
+    degraded = not scanners_used
+    if degraded:
+        causes = [d for d in diagnostics
+                  if any(k in d for k in ("not used", "cannot work without network"))]
+        reasons = list(reasons)
+        if target_error:
+            # Nothing was analysed because the target does not exist. Reporting
+            # "pass" here would mean a typo turns a build green.
+            verdict = "fail"
+            reasons.append("target could not be resolved, so nothing was analysed")
+        elif causes and verdict == "pass" and getattr(pol, "fail_on_degraded", False):
+            verdict = "fail"
+            reasons.append("no scanner produced results and the policy requires "
+                           "at least one working scanner")
+        if causes or target_error:
+            reasons.append("DEGRADED: no scanner produced results")
+
+    warnings: list[str] = []
+    if "falco" in plan["engines"] and scanner_status.get("falco") != "ok":
+        warnings.append(
+            "falco observed nothing. It reads kernel events through an eBPF "
+            "driver, which must be installed once: sudo sarbar setup --driver. "
+            "Until then nothing about the container's behaviour is known — "
+            "which is not the same as the container being clean.")
+    if degraded and not target_error:
+        warnings.append("no scanner ran at all: nothing was actually analysed")
+
     return {
         "target": target.raw,
         "target_kind": kind,
         "image_ref": image_ref,
         "profile": pol.name,
         "plan": plan,
-        "engines_used": engines_used,
+        "scanners_used": scanners_used,
+        "scanner_status": scanner_status,
         "findings": findings,
         "risk": {"score": risk.score, "level": risk.level,
                  "counts": risk.counts, "max_cvss": risk.max_cvss,
                  "reasons": risk.reasons},
         "verdict": verdict,
         "policy_reasons": reasons,
-        "offline": bool(offline or fallback),
+        "offline": bool(offline),
+        "degraded": degraded,
+        "diagnostics": diagnostics,
+        "warnings": warnings,
     }

@@ -1,3 +1,0 @@
-[console_scripts]
-cast = sarbar.cli:main
-sarbar = sarbar.cli:main

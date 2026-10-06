@@ -15,13 +15,15 @@ sarbar scan ./Dockerfile       # Dockerfile -> линт + misconfig
 sarbar scan ./app              # каталог    -> уязвимости ФС + поиск секретов
 ```
 
-> Бинарь `cast` — полный алиас `sarbar`, все примеры ниже работают с обоими именами.
+> Команды `cast` и `scan` — полные алиасы `sarbar`.
 > Репозиторий называется `cast`, пакет и команда по умолчанию — `sarbar`.
+> Полная спецификация и журнал изменений — в [SPEC.md](SPEC.md).
 
 ---
 
 ## Содержание
 
+- [Принцип честности результата](#принцип-честности-результата)
 - [Чем это отличается от Trivy / Grype / Clair / Anchore](#чем-это-отличается-от-trivy--grype--clair--anchore)
 - [Возможности](#возможности)
 - [Установка](#установка)
@@ -32,13 +34,35 @@ sarbar scan ./app              # каталог    -> уязвимости ФС 
 - [Risk score: методика](#risk-score-методика)
 - [Форматы отчёта](#форматы-отчёта)
 - [Offline-режим](#offline-режим)
+- [Движки и их установка](#движки-и-их-установка)
 - [История прогонов](#история-прогонов)
 - [Архитектура](#архитектура)
-- [Собственные проверки (cast-checks)](#собственные-проверки-cast-checks)
+- [Собственные проверки (sarbar-checks)](#собственные-проверки-sarbar-checks)
 - [Структура репозитория](#структура-репозитория)
 - [Тесты](#тесты)
 - [Roadmap](#roadmap)
 - [Лицензия](#лицензия)
+
+---
+
+## Принцип честности результата
+
+Сканер безопасности, который отвечает «всё чисто» на упавшем движке, опаснее
+отсутствия сканирования. Поэтому в sarbar жёстко зафиксированы инварианты
+(полный список — в [SPEC.md](SPEC.md), раздел 3):
+
+| Инвариант | Что это значит на практике |
+|---|---|
+| Упавший движок не может дать `PASS` | Прогон помечается `DEGRADED`, вердикт `FAIL`, причина в `diagnostics` |
+| Наличие внешнего сканера не отключает `sarbar-checks` | Свои проверки идут **всегда**, а не «если ничего не нашлось» |
+| `--offline` всегда выполняет `sarbar-checks` | Документация и поведение совпадают |
+| Бинарь исполняется по абсолютному пути | `~/.sarbar/bin` не в PATH — и это не ломает сканирование |
+| Неразрешимая цель — ошибка, а не пустой успех | Опечатка в пути даёт `exit 2`, а не зелёный CI |
+| Усечение охвата не бывает молчащим | `files scanned`, `skipped_*`, `truncated` попадают в отчёт |
+| HTML-отчёт экранирует внешние данные | Имя пакета из чужого реестра не executes JS в вашем отчёте |
+| Сборка не ходит в сеть | Бинари движков ставит только явная `sarbar setup` |
+
+Если эти правила нарушаются — это баг, а не «особенность режима».
 
 ---
 
@@ -52,61 +76,78 @@ CAST **не** является «ещё одним сканером уязвим
 | Вопрос | Ответ (где в коде) |
 |---|---|
 | Зачем вы, если есть Trivy? | CAST решает другую задачу: **выбор инструмента, склейка результатов, оценка риска, политика**. Сканеры — адаптеры в `sarbar/engines/` |
-| Что здесь вашего? | 1) определение типа цели (`sarbar/target.py`); 2) объяснимый план сканирования (`orchestrator.plan_scan`); 3) единая модель находки (`model.py`); 4) дедупликация и корреляция (`normalize.py`); 5) собственные проверки (`checks/`); 6) композитный risk score (`risk.py`); 7) политика fail/pass (`policy.py`); 8) единый отчёт в 4 форматах (`report.py`); 9) локальная история (`history.py`) |
+| Что здесь вашего? | 1) определение типа цели (`target.py`); 2) объяснимый план скана (`orchestrator.plan_scan`); 3) единая модель находки (`model.py`); 4) дедупликация и корреляция (`normalize.py`); 5) собственные проверки (`checks/`); 6) композитный risk score (`risk.py`); 7) политика fail/pass (`policy.py`); 8) единый отчёт в 4 форматах (`report.py`); 9) локальная история (`history.py`) |
 | Своя CVE-база? | Нет. CVE приходят из движков и только нормализуются |
 | Парсеры экосистем? | Нет, это делают Trivy/Grype |
-| Свой runtime-агент? | Нет. Runtime = `docker inspect` + эвристики (`checks.check_inspect`): privileged, root, capabilities, `docker.sock`, host-сеть. Без kernel-модулей |
+| Свой runtime-агент? | Нет и не будет. Runtime = `docker inspect` + эвристики (`checks.check_inspect`). Без kernel-модулей |
 | Два режима? | Да: `auto` (CAST сама выбирает движки) и агрегатор (`--engine X` — движок фиксирован, а модель, риск, политика и отчёт всё равно наши) |
-
-Научный руководитель согласовал направление как «применяешь тот инструмент,
-который необходим; если готовый не подходит — своё решение или комбинация».
-Это реализовано буквально: `orchestrator.plan_scan` подбирает движок под тип
-цели и профиль, а там, где универсальные сканеры слабы (секреты, гигиена
-Dockerfile, runtime-конфигурация), работают `cast-checks`.
 
 ---
 
 ## Возможности
 
-- **4 типа целей из одного аргумента**: образ, запущенный контейнер, Dockerfile, каталог/файл.
-- **2 режима**: `auto` (интеллектуальный выбор движков) и агрегатор (`--engine`).
-- **Единая модель находки**: любой движок → `Finding(severity, package, cvss, engine, category, …)`.
-- **Дедупликация** по стабильному fingerprint: один и тот же CVE от Trivy и Grype — одна строка с `engines_seen=[trivy, grype]`.
-- **Корреляция** image ↔ runtime: находки запущенного контейнера связываются с уязвимостями его образа.
-- **Собственные проверки** там, где сканеры слабы: секреты, Dockerfile, runtime-конфиг.
-- **Композитный risk score 0–100** с объяснением (`risk reasons`).
-- **Политика fail/pass** с профилями `default / ci / strict / offline` и переопределением из CLI для CI.
-- **4 формата отчёта**: console, JSON, SARIF (импорт в GitHub Code Scanning), HTML.
-- **Локальная история** прогонов в SQLite — задел под будущий web-интерфейс без переписывания ядра.
-- **Offline-режим**: воспроизводимое демо без сети и без установленных сканеров.
+- **Единая модель находки** (`Finding`) для всех четырёх движков: нормализация
+  severity из диалектов Trivy / Grype / Dockle / Falco, стабильный fingerprint.
+- **Дедупликация** по fingerprint: один и тот же CVE от Trivy и Grype — одна
+  строка с `engines_seen=[trivy, grype]`, худшей severity и максимальным CVSS.
+- **Корреляция**: runtime-находка связывается с уязвимостью образа по пакету,
+  поэтому `scan <container>` показывает цепочку «образ → поведение».
+- **Объяснимый план** (`--explain`): какие движки выбраны и почему.
+- **Собственные проверки** `sarbar-checks` — линт Dockerfile, поиск секретов,
+  runtime-риски из `docker inspect`. Чистый Python, без БД и без сети.
+- **Композитный risk score** 0–100 с затуханием вклада класса и построчным
+  объяснением каждого числа.
+- **Политика fail/pass** в профилях `default | ci | strict | offline | report`,
+  переопределяется из CLI через `--fail-on`.
+- **Четыре формата отчёта**: `console`, `json`, `sarif` (SARIF 2.1.0, валидна по
+  официальной схеме), `html`.
+- **Exit-коды**: `0` pass, `1` policy fail, `2` ошибка ввода или неразрешимая цель.
+- **История прогонов** в SQLite с миграцией схемы.
 
 ---
 
 ## Установка
 
-Требования: Python 3.10+. Опционально (для живых сканирований): `docker`, `trivy`, `grype`, `dockle`.
-Без них утилита работает в offline/demo-режиме.
+Требования: Python 3.10+. Обязательных зависимостей нет — утилита должна
+работать в изолированном контуре.
 
 ```bash
 git clone https://github.com/doisss/cast.git
 cd cast
-python3 -m venv .venv
-.venv/bin/pip install -e .
-ln -sf "$PWD/.venv/bin/sarbar" ~/.local/bin/sarbar   # если ~/.local/bin в PATH
-ln -sf "$PWD/.venv/bin/cast" ~/.local/bin/cast       # алиас
+
+python3 -m venv .venv && . .venv/bin/activate
+pip install -e ".[dev]"        # или: pip install .
 ```
 
-Проверка:
+Опциональные extras:
+
+| Extra | Что даёт |
+|---|---|
+| `report` | `rich` — табличный вывод в терминале (без него работает текстовый рендерер) |
+| `yaml` | `PyYAML` — чтение `policies/*.yaml`. Без него работает встроенная таблица профилей |
+| `dev` | pytest, pytest-cov, rich, PyYAML |
+
+Сканеры — по желанию:
 
 ```bash
-sarbar --version
-sarbar engines     # какие движки реально доступны, какие уйдут во fallback
+sarbar setup                   # скачать trivy и falco в ~/.sarbar/bin
+sarbar engines                 # проверить, что видно и что работает
 ```
 
-Для разработки:
+`~/.sarbar/bin` может не быть в `PATH` — sarbar это учитывает: движок ищется
+сначала в `PATH`, затем в `~/.sarbar/bin`, и запускается по абсолютному пути.
+Если хотите пользоваться им из shell:
 
 ```bash
-.venv/bin/pip install -e ".[dev]"
+export PATH="$HOME/.sarbar/bin:$PATH"
+# или симлинк в ~/.local/bin
+```
+
+Полная установка одной командой (нужен root, ставит движки в `/usr/bin`):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/uninstall.sh | sudo bash
 ```
 
 ---
@@ -126,28 +167,42 @@ sarbar scan ./Dockerfile
 # Каталог: fs-уязвимости + поиск секретов + линт Dockerfile (если есть рядом)
 sarbar scan ./app
 
-# CI-режим: молча, exit 1 при нарушении политики
-sarbar pipeline ./app
+# Только свои проверки, без внешних движков — работает где угодно
+sarbar scan ./app --engine none
+
+# Полностью офлайн: свои проверки + помеченные mock-данные
+sarbar scan ./app --offline
+
+# CI-режим: exit 1 при нарушении политики
+sarbar pipeline ./app --profile strict
 
 # Посмотреть историю
 sarbar history --limit 10
 ```
 
-Пример вывода (сокращён):
+Пример вывода (сокращён, `--offline --engine none`, движков в системе нет):
 
 ```
-sarbar scan ./examples/vuln-app  (kind=fs, profile=default)
-engines: mock, cast-checks  [offline/fallback]
-risk: 85.3 (critical)  verdict: FAIL
-counts: CRITICAL=1 HIGH=5 LOW=2 MEDIUM=4
-----------------------------------------------------------------------------------------------------
-CRITICAL CVE-2024-21626           runc:1.1.9        1.1.12  [mock] Container escape via runC
-HIGH     CAST-SECRET-001          -                 -       [cast-checks] Possible AWS access key
-HIGH     CAST-DOCKER-003          -                 -       [cast-checks] Running as root (no USER)
-...
-risk reasons: CRITICAL:1x -> +25.0; HIGH:5x -> +32.3; ...; leaked secret -> +5.0
-policy: critical findings 1 >= threshold 1; risk score 85.3 >= threshold 80.0
+sarbar scan ./examples/vuln-app/Dockerfile  (kind=dockerfile, profile=default)
+engines: (none)  [DEGRADED]
+risk: 23.9 (low)  verdict: FAIL
+counts: HIGH=2 LOW=2 MEDIUM=2
+--------------------------------------------------------------------------
+HIGH     CAST-DOCKER-003   -  -  [sarbar-checks]  Running as root (no USER)
+HIGH     CAST-DOCKER-005   -  -  [sarbar-checks]  Secrets via ENV/ARG
+MEDIUM   CAST-DOCKER-001   -  -  [sarbar-checks]  Avoid ADD in favor of COPY
+MEDIUM   CAST-DOCKER-002   -  -  [sarbar-checks]  Base image not version-pinned
+LOW      CAST-DOCKER-004   -  -  [sarbar-checks]  apt-get without cleanup
+LOW      CAST-DOCKER-006   -  -  [sarbar-checks]  Missing HEALTHCHECK
+--------------------------------------------------------------------------
+risk reasons: HIGH:2x -> +17.1; MEDIUM:2x -> +5.1; LOW:2x -> +1.7
+policy: leaked secret findings 1 >= threshold 1; no external scanner produced
+        results and policy requires at least one working engine;
+        DEGRADED: results come from sarbar-checks/mock only, not from a real scanner
 ```
+
+Строка `DEGRADED` — не украшение, а требование инварианта I-1: прогон без
+работающего внешнего движка не имеет права выглядеть зелёным.
 
 ---
 
@@ -155,105 +210,122 @@ policy: critical findings 1 >= threshold 1; risk score 85.3 >= threshold 80.0
 
 ```
 sarbar scan TARGET [--profile NAME] [--engine NAME] [--format FMT]
-                   [-o FILE] [--offline] [--no-cast-checks] [--explain]
-                   [--no-history] [--fail-on SPEC]
+                   [-o FILE] [--offline] [--no-cast-checks] [--no-mock]
+                   [--explain] [--no-history] [--fail-on SPEC]
 sarbar pipeline TARGET [те же флаги]   # CI: exit 1 при verdict=fail
 sarbar history [--limit N]
 sarbar engines
+sarbar setup
 ```
 
 | Флаг | Назначение |
 |---|---|
-| `--profile default\|ci\|strict\|offline` | профиль риска и политики (по умолчанию `default`) |
-| `--engine trivy\|grype\|dockle\|none` | режим агрегатора: зафиксировать один движок; модель, риск, политика и отчёт остаются наши |
+| `--profile default\|ci\|strict\|offline\|report` | профиль риска и политики |
+| `--engine trivy\|grype\|dockle\|falco\|none` | агрегатор: зафиксировать один движок; `none` — только `sarbar-checks` |
 | `--format console\|json\|sarif\|html` | формат отчёта |
-| `-o, --output FILE` | записать отчёт в файл вместо stdout |
-| `--offline` | без сети: внешние движки не вызываются, только локальные проверки + помеченный mock |
+| `-o, --output FILE` | записать отчёт в файл (работает для всех форматов, включая `console`) |
+| `--offline` | не вызывать внешние движки; `sarbar-checks` всё равно выполняются |
 | `--no-cast-checks` | отключить собственные проверки |
-| `--explain` | показать, почему выбраны именно эти движки (`plan.why`) |
+| `--no-mock` | никогда не подставлять mock-данные вместо отсутствующих движков |
+| `--explain` | показать, почему выбраны именно эти движки |
 | `--no-history` | не сохранять прогон в историю |
-| `--fail-on critical=1,high=5,score=60` | переопределить пороги политики из CLI (удобно для CI) |
+| `--fail-on SPEC` | переопределить пороги, например `critical=1,high=5,secret=0,score=60,degraded=off` |
 
-Полезные комбинации:
-
-```bash
-sarbar scan alpine:3.19 --engine trivy --explain
-sarbar scan ./app --offline --format json -o report.json
-sarbar scan ./app --format sarif -o report.sarif     # импорт в GitHub Code Scanning
-sarbar scan ./app --format html -o report.html
-sarbar pipeline ./app --profile strict --fail-on critical=1,high=1,score=40
-```
+Exit-коды: `0` — verdict `pass`; `1` — verdict `fail`; `2` — ошибка ввода или
+неразрешимая цель.
 
 ---
 
 ## Два режима: auto и агрегатор
 
-**Режим A — `auto` (по умолчанию).** Пользователь указывает цель, CAST сама:
-1. определяет тип цели (`target.py`);
-2. выбирает сканеры по профилю (`orchestrator.plan_scan`);
-3. запускает их;
-4. нормализует выводы в одну модель (`model.py`);
-5. дедуплицирует и коррелирует (`normalize.py`);
-6. запускает свои `cast-checks`;
-7. считает risk score (`risk.py`);
-8. применяет политику fail/pass (`policy.py`);
-9. печатает единый отчёт и сохраняет прогон в историю.
+**Режим A — auto.** Пользователь даёт цель, CAST сама выбирает движки по
+профилю и показывает план:
 
-Выбор движков по типу цели (профиль `ci`):
+1. определяет тип цели (`image` / `container` / `dockerfile` / `fs`);
+2. выбирает движки из профиля;
+3. выполняет их и разбирает вывод;
+4. добавляет свои проверки `sarbar-checks`;
+5. дедуплицирует и коррелирует;
+6. считает risk score;
+7. применяет политику;
+8. печатает отчёт и сохраняет прогон.
 
-| Цель | Движки | Свои проверки |
+| Цель (профиль `ci`) | Движки | Свои проверки |
 |---|---|---|
-| image | trivy, grype | метки образа |
-| container | trivy, grype (по образу из `docker inspect`) | runtime-inspect |
-| dockerfile | dockle | dockerfile-lint (всегда, офлайн) |
-| fs | trivy, grype | secret-scan + dockerfile-lint, если Dockerfile рядом |
+| image | trivy, grype | — |
+| container | trivy, grype, falco (по образу из `docker inspect`) | runtime-inspect |
+| dockerfile | dockle | dockerfile-lint (всегда) |
+| fs | trivy, grype | secret-scan + dockerfile-lint (если Dockerfile рядом) |
 
-**Режим B — агрегатор.** Пользователь явно фиксирует движок (`--engine trivy`),
-но формат вывода, нормализация, политика и отчёт — всё равно наши.
-Так один и тот же пайплайн сравнивает движки между собой.
+**Режим B — агрегатор.** Пользователь явно фиксирует движок
+(`--engine trivy`), но формат вывода, нормализация, политика и отчёт — всё
+равно наши. Так один и тот же пайплайн сравнивает движки между собой.
 
 ---
 
 ## Профили и политика
 
-Профили лежат в `policies/*.yaml` (код работает и без PyYAML — есть встроенный
-fallback в `policy.py`, поэтому offline-режим не требует зависимостей):
+Профили лежат в `sarbar/policies/*.yaml` **внутри пакета** — поэтому они
+доходят до установленной копии. Код работает и без PyYAML: в `policy.py` есть
+встроенная таблица, YAML — редактируемый оверлей. Битая YAML-файл выводит
+предупреждение, а не игнорируется молча.
 
-| Профиль | Движки | Пороги fail |
+| Профиль | Движки (fs) | Пороги fail |
 |---|---|---|
-| `default` | минимум шума | critical ≥ 1 или score ≥ 80 |
-| `ci` | trivy+grype cross-check | critical ≥ 1, high ≥ 5, score ≥ 60 |
-| `strict` | всё включено | critical/high ≥ 1, score ≥ 40 |
-| `offline` | только cast-checks (air-gap, демо без интернета) | critical ≥ 1, score ≥ 80 |
+| `default` | trivy | critical ≥ 1, secret ≥ 1, score ≥ 80, degraded |
+| `ci` | trivy + grype | critical ≥ 1, high ≥ 5, secret ≥ 1, score ≥ 60, degraded |
+| `strict` | trivy + grype | critical ≥ 1, high ≥ 1, secret ≥ 1, score ≥ 40, degraded |
+| `offline` | — | critical ≥ 1, secret ≥ 1, score ≥ 80 (degraded разрешён) |
+| `report` | trivy | ничего не валит — для baseline перед выбором порогов |
+
+Значение `-1` означает «никогда». Флаг `degraded` означает «не проходить прогон,
+где ни один внешний движок не отработал».
 
 ---
 
 ## Risk score: методика
 
-Композитная оценка 0–100 (`sarbar/risk.py`) — собственная методика, выносится на защиту:
+Композитная оценка 0–100 (`sarbar/risk.py`) — собственная методика, выносится
+на защиту:
 
 ```
 score = min(100, severity_points + cvss_lift + category_penalty)
 ```
 
 - **severity_points**: веса CRITICAL=25, HIGH=10, MEDIUM=3, LOW=1 с затуханием
-  `w/sqrt(n)` (один critical — плохо, двадцать — не в 20 раз хуже) и капом вклада класса;
+  `w/√n` (один critical — плохо, двадцать — не в 20 раз хуже) и капом вклада
+  класса: CRITICAL ≤ 60, HIGH ≤ 40, MEDIUM ≤ 25, LOW ≤ 10;
 - **cvss_lift** = `min(15, max_cvss × 1.5)`;
 - **category_penalty**: +5 за утёкший секрет, +5 за runtime-проблему.
 
 Уровни: ≥ 80 critical, ≥ 60 high, ≥ 30 medium, ≥ 5 low, иначе ok.
 Каждая цифра в отчёте объясняется строкой `risk reasons`.
 
+**Честное ограничение методики.** Капы делают оценку насыщающейся: уже 5
+CRITICAL дают потолок в 60 баллов, а 10 HIGH — 40. В диапазоне примерно от 5 до
+200 находок одного класса score перестаёт различать случаи. Это осознанное
+решение (score отвечает на вопрос «насколько всё плохо», а не «сколько всего
+находок»), но детализацию в этом диапазоне несут сами находки, а не число.
+Кап всегда помечается в `risk reasons` словом `class cap`.
+
 ---
 
 ## Форматы отчёта
 
-- **console** — человек читает в терминале; verdict и причины — всегда внизу;
-- **json** — машиночитаемый, поле `plan.why` фиксирует объяснимость выбора движков;
-- **sarif** — стандарт SARIF 2.1.0, грузится в GitHub Code Scanning;
-- **html** — одностраничный отчёт для приложения к диплому.
+- **console** — человек читает в терминале; verdict, причины и диагностика
+  всегда внизу. С `-o FILE` используется текстовый рендерер, чтобы вывод
+  попал в файл.
+- **json** — машиночитаемый, поле `plan.why` фиксирует объяснимость выбора
+  движков; `diagnostics`, `engine_status`, `coverage`, `degraded` позволяют
+  отличить «чисто» от «не смогли проверить».
+- **sarif** — SARIF 2.1.0, валидна по официальной схеме; `rules[]`
+  дедуплицированы по id (иначеGitHub Code Scanning отвергает файл, когда один
+  CVE задевает два пакета), у результатов есть `ruleIndex` и `locations`.
+- **html** — одностраничный отчёт для приложения к диплому. Любое поле,
+  пришедшее извне, экранируется через `html.escape`.
 
-Exit-код: `0` при `verdict=pass`, `1` при `verdict=fail` — CI-системы понимают без парсинга.
+Exit-код: `0` при `verdict=pass`, `1` при `verdict=fail`, `2` при ошибке —
+CI-системы понимают без парсинга.
 
 ---
 
@@ -264,16 +336,48 @@ sarbar scan ./examples/vuln-app --offline --explain
 ```
 
 Гарантирует воспроизводимость (демо на защите без интернета): внешние бинари
-не вызываются, результат строится из `cast-checks` + детерминированного mock,
-прогон помечается `offline=True`. Mock-данные явно подписаны `engine=mock`
-и не должны трактоваться как живой CVE-фид — это стенд-заглушка.
+не вызываются, **собственные проверки выполняются всегда**, результат
+дополняется детерминированным mock-ом, прогон помечается `DEGRADED`.
+Mock-данные явно подписаны `engine=mock` и не должны трактоваться как живой
+CVE-фид — это стенд-заглушка. Убрать его совсем: `--no-mock`.
+
+Чтобы получить **только** свои проверки без mock-данных:
+
+```bash
+sarbar scan ./examples/vuln-app --engine none --no-mock
+```
+
+---
+
+## Движки и их установка
+
+| Движок | Режимы | Нужен root | Замечание |
+|---|---|---|---|
+| `trivy` | image, fs, dockerfile, container | нет | основной движок |
+| `grype` | image, fs, container | нет | второе мнение по уязвимостям |
+| `dockle` | image, dockerfile | нет | misconfig для Dockerfile и образа |
+| `falco` | container, image | **да** | eBPF/kmod-драйвер; см. ниже |
+| `sarbar-checks` | все | нет | встроенный Python, всегда доступен |
+
+`sarbar engines` различает `ready`, `absent` и **`broken`** — файл найден, но
+`--version` на нём падает. Такой движок не считается доступным.
+
+**Про Falco честно.** Falco — привилегированный демон, работающий через eBPF или
+kernel-модуль. Короткое окно запуска в адаптере (20 с) **не является настоящим
+runtime-сканом**. Адаптер запускает Falco в ограниченном окне и честно сообщает
+результат: если событий нет или время вышло — выводится предупреждение, а не
+запись «контейнер проверен и чист». Для реального runtime-детектирования
+запускайте Falco как сервис.
 
 ---
 
 ## История прогонов
 
 Каждый прогон (если не указан `--no-history`) сохраняется в SQLite
-`~/.sarbar/history.db`: цель, профиль, движки, score, verdict, находки.
+`~/.sarbar/history.db`: цель, профиль, движки, score, verdict, признак
+деградации и находки. Схема версионируется и мигрируется, поэтому база от
+предыдущей версии sarbar продолжает работать.
+
 Будущий web-интерфейс будет читать эту же базу — ядро переписывать не придётся
 (web сейчас сознательно не делается по ТЗ).
 
@@ -282,55 +386,95 @@ sarbar scan ./examples/vuln-app --offline --explain
 ## Архитектура
 
 ```
-sarbar/cli.py            только UX (argparse) -> вызывает orchestrator
-sarbar/orchestrator.py   plan_scan / run_scan: выбор движков, порядок, offline
-sarbar/target.py         detect_target: image | container | dockerfile | fs
-sarbar/engines/          адаптеры: run() -> list[Finding]; недоступен -> fallback
-sarbar/checks/           своё: dockerfile-lint, secrets, runtime-inspect
-sarbar/normalize.py      dedup по fingerprint + корреляция image<->runtime
-sarbar/risk.py           композитный score + уровень
-sarbar/policy.py         профили default/ci/strict/offline + fail/pass
-sarbar/report.py         console / json / sarif / html — один UX для всех движков
-sarbar/history.py        SQLite ~/.sarbar/history.db — будущий бэкенд web
+                    ┌──────────────┐
+   sarbar scan ────▶│    cli.py    │  UX: аргументы, коды возврата, вывод
+                    └──────┬───────┘
+                    ┌──────▼───────┐
+                    │   target.py  │  1. что за цель
+                    └──────┬───────┘
+                    ┌──────▼────────┐
+                    │ orchestrator  │  2. план → исполнение → деградация
+                    └──────┬────────┘
+           ┌───────────────┼────────────────┐
+    ┌──────▼─────┐  ┌──────▼──────┐  ┌──────▼────────┐
+    │  engines/  │  │  checks/    │  │    policy.py  │
+    │ trivy      │  │ Dockerfile  │  │  профили и    │
+    │ grype      │  │ секреты     │  │  пороги       │
+    │ dockle     │  │ runtime     │  └──────┬────────┘
+    │ falco      │  │ (inspect)   │         │
+    └──────┬─────┘  └──────┬──────┘  ┌──────▼────────┐
+           └───────────────┴─────────┤    risk.py    │
+                                      │  score 0..100 │
+                                      └──────┬────────┘
+                                ┌────────────┴────────────┐
+                        ┌───────▼───────┐          ┌───────▼──────┐
+                        │  report.py    │          │  history.py  │
+                        │ console/json  │          │ SQLite       │
+                        │ sarif/html    │          └──────────────┘
+                        └───────────────┘
 ```
 
-Поток данных: `цель → план → движки + cast-checks → нормализация → риск → политика → отчёт + история`.
-Сканер заменяется одним адаптером с контрактом `run(target, kind) -> list[Finding]`.
+| Модуль | Роль |
+|---|---|
+| `sarbar/target.py` | классификация цели, разрешение неоднозначностей |
+| `sarbar/model.py` | `Finding`, алиасы severity, fingerprint |
+| `sarbar/engines/` | адаптеры движков, контракт `EngineResult` со статусом |
+| `sarbar/checks/` | собственные проверки (Dockerfile, секреты, runtime) |
+| `sarbar/normalize.py` | дедупликация и корреляция |
+| `sarbar/risk.py` | композитный score |
+| `sarbar/policy.py` | профили, пороги, YAML-оверлей |
+| `sarbar/report.py` | четыре формата вывода |
+| `sarbar/cli.py` | разбор аргументов, коды возврата |
+| `sarbar/history.py` | журнал прогонов |
+| `sarbar/setup.py` | установка бинарей движков |
 
 ---
 
-## Собственные проверки (cast-checks)
+## Собственные проверки (sarbar-checks)
 
-Всегда локальные, работают офлайн, движок `cast-checks`:
+Чистый Python, без сети и без CVE-базы. Выполняются всегда, если
+`run_cast_checks` включён в профиле.
 
 | ID | Проверка | Серьёзность |
 |---|---|---|
-| CAST-DOCKER-001…006 | Dockerfile: `ADD` вместо `COPY`, тег `:latest`, запуск от root (нет `USER`), `apt-get` без чистки, секреты в `ENV/ARG`, нет `HEALTHCHECK` | LOW…HIGH |
+| CAST-DOCKER-001…007 | `ADD` вместо `COPY`, непинованный тег, запуск от root (нет `USER`), `apt-get` без чистки, секреты в `ENV/ARG`, нет `HEALTHCHECK`, установлен `sudo` | LOW…HIGH |
 | CAST-SECRET-001…005 | AWS-ключи, приватные ключи, GitHub-токены, пароли в присваиваниях, generic API-токены | MEDIUM…HIGH |
-| CAST-RT-001…005 | `--privileged`, запуск от root, опасные capabilities, host-сеть, монтирование `docker.sock` | MEDIUM…CRITICAL |
+| CAST-RT-001…009 | `--privileged`, root, опасные capabilities, host-сеть, `docker.sock`, host PID, host IPC, отключённый AppArmor/seccomp, writable rootfs | LOW…CRITICAL |
+
+Секрет-сканер помнит **все** вхождения: 40 совпадений в 40 файлах дают одну
+находку с пометкой `x40 locations`, а не одну находку с именем случайного
+файла. Любое усечение охвата (лимит файлов, бинарники, слишком большие файлы)
+попадает в `diagnostics`.
 
 ---
 
 ## Структура репозитория
 
 ```
-.
-├── sarbar/                 # пакет (ядро + CLI)
-│   ├── cli.py              # только UX
-│   ├── target.py           # определение типа цели
-│   ├── orchestrator.py     # план и запуск (ядро диплома)
-│   ├── engines/            # адаптеры trivy / grype / dockle + mock
-│   ├── checks/             # собственные проверки
-│   ├── model.py            # единая модель Finding
-│   ├── normalize.py        # дедупликация + корреляция
-│   ├── risk.py             # risk score
-│   ├── policy.py           # профили и fail/pass
-│   ├── report.py           # 4 формата отчёта
-│   └── history.py          # SQLite-история
-├── policies/               # default.yaml, ci.yaml, strict.yaml, offline.yaml
-├── tests/                  # pytest: target, normalize, risk, checks, cli
-├── examples/vuln-app/      # уязвимый пример для демо (Dockerfile + app.py)
-└── pyproject.toml          # установка: pip install -e .
+sarbar/
+├── sarbar/
+│   ├── __init__.py       # публичный API
+│   ├── __main__.py       # python -m sarbar
+│   ├── model.py          # Finding, severity, fingerprint
+│   ├── target.py         # классификация цели
+│   ├── orchestrator.py   # план, исполнение, деградация
+│   ├── normalize.py      # дедупликация, корреляция
+│   ├── risk.py           # композитный score
+│   ├── policy.py         # профили и пороги
+│   ├── report.py         # console / json / sarif / html
+│   ├── history.py        # SQLite-журнал
+│   ├── cli.py            # CLI
+│   ├── setup.py          # sarbar setup
+│   ├── checks/           # sarbar-checks
+│   ├── engines/          # адаптеры + mock
+│   └── policies/         # *.yaml — профили (внутри пакета)
+├── tests/                # pytest
+├── examples/vuln-app/    # намеренно дырявый пример
+├── install.sh            # установка одной командой (нужен root)
+├── uninstall.sh          # удаление с выбором движков
+├── pyproject.toml        # метаданные пакета
+├── SPEC.md               # спецификация + журнал изменений
+└── README.md
 ```
 
 ---
@@ -338,29 +482,33 @@ sarbar/history.py        SQLite ~/.sarbar/history.db — будущий бэке
 ## Тесты
 
 ```bash
-.venv/bin/python -m pytest -q
+pip install -e ".[dev]"
+pytest                              # весь набор
+pytest --cov=sarbar --cov-report=term-missing
 ```
 
-Покрыто: классификация целей, дедупликация и сортировка, score и политика,
-все группы cast-checks, план оркестратора (auto/forced), offline-скан,
-команды `engines`/`history`. Живые прогоны без сети:
-
-```bash
-sarbar scan ./examples/vuln-app --offline --explain
-```
+Набор покрывает адаптеры движков на фикстурах реального JSON (Trivy, Grype,
+Dockle, Falco), инварианты оркестратора, дедупликацию и корреляцию, методику
+risk score, пороги политики, все четыре формата отчёта, CLI и SQLite-историю.
+Тесты `tests/test_orchestrator.py` защищают инварианты из [SPEC.md](SPEC.md)
+и не должны удаляться.
 
 ---
 
 ## Roadmap
 
-- [x] CLI, оба режима, 4 типа целей
-- [x] Политика, risk score, 4 формата отчёта, история
-- [ ] E2E-прогоны с живыми trivy/grype/dockle в CI
-- [ ] Web-интерфейс поверх `history.db` (ядро не меняется)
-- [ ] Уведомления, дашборд, сравнение прогонов во времени
+- [x] Оркестратор с объяснимым планом
+- [x] Четыре движка + `sarbar-checks`
+- [x] Risk score и политика профилей
+- [x] Четыре формата отчёта (включая валидный SARIF)
+- [x] Offline-режим без зависимостей
+- [x] Один тест на каждый инвариант
+- [ ] Web-интерфейс поверх существующей базы истории
+- [ ] Интеграция с CI (GitHub Actions / GitLab CI) как готовый action
+- [ ] Baseline-режим: сравнение прогонов и регресс-детект
 
 ---
 
 ## Лицензия
 
-MIT, см. [LICENSE](LICENSE).
+MIT — см. [LICENSE](LICENSE).

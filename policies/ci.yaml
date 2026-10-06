@@ -1,9 +1,0 @@
-# ci profile: two vuln engines cross-check each other + own checks, stricter gates
-engines_image: [trivy, grype]
-engines_container: [trivy, grype]
-engines_dockerfile: [dockle]
-engines_fs: [trivy, grype]
-run_cast_checks: true
-fail_on_critical: 1
-fail_on_high: 5
-fail_score: 60.0

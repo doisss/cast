@@ -1,10 +1,21 @@
 __pycache__/
 *.pyc
-.egg-info/
+*.egg-info/
 dist/
 build/
-.pytest_cache/
 .venv/
-~/.sarbar/
+.pytest_cache/
+.coverage
+htmlcov/
+TEST_REPORT.html
 *.sarif
-report.*
+
+# Generated scan output. Scoped to the repository root on purpose: the bare
+# pattern "report.*" also matched sarbar/report.py and sarbar/policies/report.yaml,
+# which silently kept them out of the repository — anyone installing from GitHub
+# would have got a package that cannot produce a report.
+/report.html
+/report.json
+/report.sarif
+/report.txt
+/report.xml

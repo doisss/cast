@@ -1,9 +1,0 @@
-# default profile: minimal noise, fail only on criticals / high risk
-engines_image: [trivy]
-engines_container: [trivy]
-engines_dockerfile: [dockle]
-engines_fs: [trivy]
-run_cast_checks: true
-fail_on_critical: 1
-fail_on_high: -1
-fail_score: 80.0

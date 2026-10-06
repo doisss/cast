@@ -1,0 +1,11 @@
+# report profile: collect and report, never fail. For baselining a codebase
+# before you decide which gates to enforce.
+engines_image: [trivy]
+engines_container: [trivy]
+engines_dockerfile: [trivy]
+engines_fs: [trivy]
+fail_on_critical: -1
+fail_on_high: -1
+fail_on_secret: -1
+fail_score: -1.0
+fail_on_degraded: false

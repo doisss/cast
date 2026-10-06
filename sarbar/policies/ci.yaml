@@ -1,0 +1,10 @@
+# ci profile: two vulnerability engines cross-check each other, stricter gates.
+engines_image: [trivy, grype]
+engines_container: [trivy, grype, falco]
+engines_dockerfile: [trivy]
+engines_fs: [trivy, grype]
+fail_on_critical: 1
+fail_on_high: 5
+fail_on_secret: 1
+fail_score: 60.0
+fail_on_degraded: true
