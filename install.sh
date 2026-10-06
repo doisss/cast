@@ -39,16 +39,32 @@ set -euo pipefail
 REF="${SARBAR_REF:-main}"
 REPO="${SARBAR_REPO:-doisss/cast}"
 WANT_DRIVER=1
-WANT_SCANNERS=1
-for arg in "$@"; do
-    case "$arg" in
+WANT_SCANNERS=1   # the promise is "one command and it works", so scanners are default
+
+# A while loop, not `for arg in "$@"`. Inside a `for` the argument list is fixed
+# before the first iteration, so `shift` had no effect and `--ref main` failed
+# with "unknown option: main".
+while [ "$#" -gt 0 ]; do
+    case "$1" in
         --no-driver)   WANT_DRIVER=0 ;;
-        --no-scanners) WANT_SCANNERS=0 ;;
-        --ref)         shift; REF="${1:?--ref needs a value}" ;;
-        --ref=*)       REF="${arg#--ref=}" ;;
+        --no-scanners) WANT_SCANNERS=1 ;;
+        --scanners)    WANT_SCANNERS=1 ;;
+        --ref)
+            case "${2:-}" in
+                ""|-*) echo "--ref needs a value" >&2; exit 2 ;;
+            esac
+            REF="$2"; shift ;;
+        --ref=*)       REF="${1#--ref=}" ;;
+        --repo)
+            case "${2:-}" in
+                ""|-*) echo "--repo needs a value" >&2; exit 2 ;;
+            esac
+            REPO="$2"; shift ;;
+        --repo=*)      REPO="${1#--repo=}" ;;
         -h|--help)     sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
-        *)             echo "unknown option: $arg" >&2; exit 2 ;;
+        *)             echo "unknown option: $1" >&2; exit 2 ;;
     esac
+    shift
 done
 
 SYSTEM=0
