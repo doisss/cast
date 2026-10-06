@@ -241,3 +241,75 @@ def test_result_has_no_mock_key(tmp_path, monkeypatch):
     res = orch.run_scan(Target(str(df), TargetKind.DOCKERFILE), _policy("default"))
     assert "mock" not in res["scanners_used"]
     assert all(f.engine != "mock" for f in res["findings"])
+
+# ------------------------------------ I-1: a green light must mean "analysed"
+
+def test_engine_none_cannot_produce_a_pass(tmp_path, monkeypatch):
+    """`-e none` asks for zero scanners.
+
+    An earlier version only turned DEGRADED into FAIL when a diagnostic said
+    "not used" — but with no scanner requested, none is attempted, so no
+    diagnostic is produced and the run slipped through as PASS with exit code 0.
+    In CI that is the worst possible outcome: a green build that checked
+    nothing.
+    """
+    from sarbar.policy import load_profile
+    from sarbar.target import Target, TargetKind
+    import sarbar.orchestrator as orch
+
+    monkeypatch.setattr(orch, "_run_engine",
+                        lambda *a, **k: pytest.fail("no scanner may run with -e none"))
+    res = orch.run_scan(Target("t", TargetKind.DOCKERFILE, "test"),
+                        load_profile("default"), forced_engine="none")
+    assert res["degraded"] is True
+    assert res["verdict"] == "fail"
+    assert any("nothing was analysed" in r for r in res["policy_reasons"]), \
+        res["policy_reasons"]
+
+
+def test_report_profile_is_the_documented_way_to_ask_for_no_gates(tmp_path, monkeypatch):
+    """`report` exists precisely so that a run with no gates is deliberate."""
+    from sarbar.policy import load_profile
+    from sarbar.target import Target, TargetKind
+    import sarbar.orchestrator as orch
+
+    monkeypatch.setattr(orch, "_run_engine",
+                        lambda *a, **k: pytest.fail("no scanner may run"))
+    res = orch.run_scan(Target("t", TargetKind.DOCKERFILE, "test"),
+                        load_profile("report"), forced_engine="none")
+    assert res["verdict"] == "pass"
+    assert res["degraded"] is True, "still honest about having analysed nothing"
+
+
+def test_a_scanner_that_ran_and_found_nothing_does_pass(tmp_path, monkeypatch):
+    """The mirror image of I-1: a green light IS allowed here, because a scanner
+    really did look and reported nothing."""
+    from sarbar.policy import load_profile
+    from sarbar.target import Target, TargetKind
+    from sarbar.engines import EngineResult
+    import sarbar.orchestrator as orch
+
+    monkeypatch.setattr(orch, "_run_engine",
+                        lambda *a, **k: EngineResult(status="ok", findings=[]))
+    res = orch.run_scan(Target("t", TargetKind.DOCKERFILE, "test"),
+                        load_profile("default"))
+    assert res["verdict"] == "pass", res
+    assert res["degraded"] is False
+
+
+def test_a_scanner_that_failed_with_no_findings_must_fail(tmp_path, monkeypatch):
+    """The dangerous shape: no findings at all, but nothing actually worked."""
+    from sarbar.policy import load_profile
+    from sarbar.target import Target, TargetKind
+    from sarbar.engines import EngineResult
+    import sarbar.orchestrator as orch
+
+    monkeypatch.setattr(
+        orch, "_run_engine",
+        lambda *a, **k: EngineResult(status="failed", findings=[],
+                                      detail="trivy exit=1, no report"))
+    res = orch.run_scan(Target("t", TargetKind.DOCKERFILE, "test"),
+                        load_profile("default"))
+    assert res["findings"] == []
+    assert res["degraded"] is True
+    assert res["verdict"] == "fail", res

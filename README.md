@@ -108,18 +108,78 @@ CAST **не** является «ещё одним сканером уязвим
 
 ## Установка
 
-Требования: Python 3.10+. Обязательных зависимостей нет — утилита должна
-работать в изолированном контуре.
+### Одна команда
+
+```bash
+curl -sfL https://raw.githubusercontent.com/doisss/cast/main/install.sh | sudo bash -s --
+```
+
+От root ставится всё, что нужно, и одним заходом:
+
+| Что | Куда |
+|---|---|
+| `sarbar`, `cast` | `/usr/bin` |
+| `trivy` | `/usr/bin` |
+| `falco`, `falcoctl` | `/usr/bin` |
+| плагин контейнеров falco | `/usr/share/falco/plugins` |
+| настройки | `/etc/falco`, `/etc/falcoctl` |
+| драйвер falco | загружается в ядро |
+
+Это обычная раскладка Linux: сканеры становятся самостоятельными командами, без
+обёрток и без правки `PATH`.
+
+Без root тоже работает, но в домашней папке и без драйвера:
+
+```bash
+curl -sfL https://raw.githubusercontent.com/doisss/cast/main/install.sh | bash -s --
+```
+
+Флагов у установщика:
+
+| Флаг | Что делает |
+|---|---|
+| `--no-driver` | не грузить драйвер falco в ядро |
+| `--no-scanners` | поставить только sarbar, без скачивания сканеров |
+| `--ref TAG` | поставить конкретный тег вместо ветки `main` |
+
+Удаление:
+
+```bash
+curl -sfL https://raw.githubusercontent.com/doisss/cast/main/uninstall.sh | sudo bash
+```
+
+### Права на Docker
+
+Сокет `docker.sock` равносилен root на хосту, поэтому установщик **не** выдаёт
+это право сам — это решение владельца машины. Чтобы sarbar мог проверять
+запущенные контейнеры:
+
+```bash
+sudo usermod -aG docker $USER   # затем выйти и войти заново
+```
+
+Без этого `sarbar scan <образ>` и `sarbar scan .` работают как обы��но.
+
+### Пароль для falco
+
+Falco читает события из ядра, поэтому при проверке запущенного контейнера
+sarbar спросит sudo-пароль на вашем терминале — один раз, дальше sudo помнит его
+несколько минут. Чтобы не спрашивать никогда:
+
+```bash
+sudo setcap cap_sys_admin,cap_perfmon,cap_sys_ptrace,cap_sys_resource+ep /usr/bin/falco
+```
+
+### Вручную, без установщика
 
 ```bash
 git clone https://github.com/doisss/cast.git
 cd cast
-
 python3 -m venv .venv && . .venv/bin/activate
-pip install -e ".[dev]"        # или: pip install .
+pip install -e ".[dev]"     # или: pip install .
 ```
 
-Опциональные extras:
+Требования: Python 3.10+, обязательных зависимостей нет. Extras:
 
 | Extra | Что даёт |
 |---|---|
@@ -127,112 +187,106 @@ pip install -e ".[dev]"        # или: pip install .
 | `yaml` | `PyYAML` — чтение `policies/*.yaml`. Без него работает встроенная таблица профилей |
 | `dev` | pytest, pytest-cov, rich, PyYAML |
 
-Сканеры — по желанию:
+Где что лежит после установки:
 
-```bash
-sarbar setup                   # скачать trivy и falco в ~/.sarbar/bin
-sarbar engines                 # проверить, что видно и что работает
-```
-
-`~/.sarbar/bin` может не быть в `PATH` — sarbar это учитывает: движок ищется
-сначала в `PATH`, затем в `~/.sarbar/bin`, и запускается по абсолютному пути.
-Если хотите пользоваться им из shell:
-
-```bash
-export PATH="$HOME/.sarbar/bin:$PATH"
-# или симлинк в ~/.local/bin
-```
-
-Полная установка одной командой (нужен root, ставит движки в `/usr/bin`):
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh | sudo bash
-curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/uninstall.sh | sudo bash
-```
+| Что | Путь |
+|---|---|
+| история прогонов | `$XDG_STATE_HOME/sarbar/history.db` (обычно `~/.local/state/sarbar/`) |
+| база уязвимостей trivy | `~/.cache/trivy` — наполняется командой `sarbar offline` |
+| настройки и бинарники без root | `~/.sarbar/` |
 
 ---
 
 ## Быстрый старт
 
 ```bash
-# Статический анализ образа
+# Образ: статический анализ
 sarbar scan alpine:3.19
 
-# Запущенный контейнер: runtime-проверки + привязка к образу
+# Запущенный контейнер: runtime-проверки + разбор образа
 sarbar scan abc123def456
 
-# Dockerfile: собственный линт + dockle (если установлен)
+# Dockerfile: ошибки конфигурации и утечки секретов
 sarbar scan ./Dockerfile
 
-# Каталог: fs-уязвимости + поиск секретов + линт Dockerfile (если есть рядом)
-sarbar scan ./app
+# Каталог: уязвимости зависимостей + поиск секретов
+sarbar scan .
 
-# Только свои проверки, без внешних движков — работает где угодно
-sarbar scan ./app --engine none
+# Полностью офлайн, на локальной базе
+sarbar offline .
 
-# Полностью офлайн: свои проверки + помеченные mock-данные
-sarbar scan ./app --offline
-
-# CI-режим: exit 1 при нарушении политики
-sarbar pipeline ./app --profile strict
+# CI: код возврата 1 при нарушении политики
+sarbar pipeline . --profile strict
 
 # Посмотреть историю
 sarbar history --limit 10
+
+# Что установлено и что работает
+sarbar engines
+sarbar setup --check
 ```
 
-Пример вывода (сокращён, `--offline --engine none`, движков в системе нет):
+Реальный вывод на Dockerfile с токеном в `ENV`:
 
 ```
-sarbar scan ./examples/vuln-app/Dockerfile  (kind=dockerfile, profile=default)
-engines: (none)  [DEGRADED]
-risk: 23.9 (low)  verdict: FAIL
-counts: HIGH=2 LOW=2 MEDIUM=2
---------------------------------------------------------------------------
-HIGH     CAST-DOCKER-003   -  -  [sarbar-checks]  Running as root (no USER)
-HIGH     CAST-DOCKER-005   -  -  [sarbar-checks]  Secrets via ENV/ARG
-MEDIUM   CAST-DOCKER-001   -  -  [sarbar-checks]  Avoid ADD in favor of COPY
-MEDIUM   CAST-DOCKER-002   -  -  [sarbar-checks]  Base image not version-pinned
-LOW      CAST-DOCKER-004   -  -  [sarbar-checks]  apt-get without cleanup
-LOW      CAST-DOCKER-006   -  -  [sarbar-checks]  Missing HEALTHCHECK
---------------------------------------------------------------------------
-risk reasons: HIGH:2x -> +17.1; MEDIUM:2x -> +5.1; LOW:2x -> +1.7
-policy: leaked secret findings 1 >= threshold 1; no external scanner produced
-        results and policy requires at least one working engine;
-        DEGRADED: results come from sarbar-checks/mock only, not from a real scanner
+sarbar scan ./Dockerfile   (kind=dockerfile, profile=default)
+├ Kind      │ dockerfile
+├ Profile   │ default
+├ Scanners  │ trivy
+├ Mode      │ normal
+├ Risk      │ 39.0 (medium)
+└ Verdict   │ FAIL
+
+Counts: CRITICAL=1  HIGH=1  LOW=1  MEDIUM=1
+
+  Sev  ID        Package   Fixed   Scanners
+  CRIT DS-0031   -         -       trivy
+  HIGH DS-0002   -         -       trivy
+  MEDI DS-0001   -         -       trivy
+  LOW  DS-0026   -         -       trivy
+
+Risk reasons: CRITICAL:1x -> +25.0; HIGH:1x -> +10.0; MEDIUM:1x -> +3.0; LOW:1x -> +1.0
+Policy: critical findings 1 >= threshold 1 findings
 ```
 
-Строка `DEGRADED` — не украшение, а требование инварианта I-1: прогон без
-работающего внешнего движка не имеет права выглядеть зелёным.
+Строка `DEGRADED` в поле Mode — не украшение, а требование инварианта I-1:
+прогон, в котором ни один внешний сканер не отработал, не имеет права выглядеть
+зелёным. Он получает `DEGRADED`, вердикт `FAIL` и код возврата 1.
 
 ---
 
 ## Команды и флаги
 
 ```
-sarbar scan TARGET [--profile NAME] [--engine NAME] [--format FMT]
-                   [-o FILE] [--offline] [--no-cast-checks] [--no-mock]
-                   [--explain] [--no-history] [--fail-on SPEC]
-sarbar pipeline TARGET [те же флаги]   # CI: exit 1 при verdict=fail
+sarbar scan TARGET [-p NAME] [-e NAME] [-f FMT] [-o FILE] [--offline]
+                   [--no-sudo] [--no-history] [--fail-on SPEC] [-ex]
+sarbar offline TARGET   [те же флаги]
+sarbar pipeline TARGET  [те же флаги]   # CI: код 1 при verdict=fail
 sarbar history [--limit N]
 sarbar engines
-sarbar setup
+sarbar setup [--system] [--driver] [--no-driver] [--uninstall-driver]
+             [--force] [--only trivy|falco] [--check]
+sarbar -v
 ```
 
 | Флаг | Назначение |
 |---|---|
-| `--profile default\|ci\|strict\|offline\|report` | профиль риска и политики |
-| `--engine trivy\|grype\|dockle\|falco\|none` | агрегатор: зафиксировать один движок; `none` — только `sarbar-checks` |
-| `--format console\|json\|sarif\|html` | формат отчёта |
-| `-o, --output FILE` | записать отчёт в файл (работает для всех форматов, включая `console`) |
-| `--offline` | не вызывать внешние движки; `sarbar-checks` всё равно выполняются |
-| `--no-cast-checks` | отключить собственные проверки |
-| `--no-mock` | никогда не подставлять mock-данные вместо отсутствующих движков |
-| `--explain` | показать, почему выбраны именно эти движки |
-| `--no-history` | не сохранять прогон в историю |
-| `--fail-on SPEC` | переопределить пороги, например `critical=1,high=5,secret=0,score=60,degraded=off` |
+| `-p, --profile default\|ci\|strict\|offline\|report` | профиль: какие сканеры и какие пороги |
+| `-e, --engine trivy\|grype\|dockle\|falco` | агрегатор: запустить ровно один сканер |
+| `-f, --format console\|json\|sarif\|html` | формат отчёта |
+| `-o, --output FILE` | записать отчёт в файл (для всех форматов) |
+| `--offline` | не выходить в сеть, использовать локальную базу |
+| `--no-sudo` | никогда не спрашивать sudo-пароль; сканеры, которым нужен root, пропускаются с пометкой |
+| `-ex, --explain` | показать, почему выбраны именно эти сканеры |
+| `--no-history` | не записывать прогон в историю |
+| `--fail-on SPEC` | переопределить пороги: `critical=1,high=5,secret=0,score=60,degraded=off` |
 
-Exit-коды: `0` — verdict `pass`; `1` — verdict `fail`; `2` — ошибка ввода или
+Коды возврата: `0` — `pass`; `1` — `fail`; `2` — ошибка ввода или
 неразрешимая цель.
+
+Флага `--no-mock` и `--no-cast-checks` больше нет: mock-движок и собственные
+проверки `sarbar-checks` удалены целиком. В отчёте нет ни одной находки,
+придуманной sarbar — каждый ID принадлежит сканеру (инвариант I-13, I-16).
 
 ---
 
@@ -332,20 +386,33 @@ CI-системы понимают без парсинга.
 ## Offline-режим
 
 ```bash
-sarbar scan ./examples/vuln-app --offline --explain
+sarbar offline ./examples/vuln-app
 ```
 
-Гарантирует воспроизводимость (демо на защите без интернета): внешние бинари
-не вызываются, **собственные проверки выполняются всегда**, результат
-дополняется детерминированным mock-ом, прогон помечается `DEGRADED`.
-Mock-данные явно подписаны `engine=mock` и не должны трактоваться как живой
-CVE-фид — это стенд-заглушка. Убрать его совсем: `--no-mock`.
+Значение `--offline` — **«работать без интернета»**, а не «ничего не проверять».
 
-Чтобы получить **только** свои проверки без mock-данных:
+Сканеры всё равно запускаются, но им запрещено выходить в сеть:
+
+| Подкоманда trivy | Флаги офлайна |
+|---|---|
+| `trivy image`, `trivy fs` | `--skip-db-update --offline-scan --skip-check-update` |
+| `trivy config` | `--skip-check-update` |
+
+Флаги разные не по недосмотру: `trivy config` ищет ошибки конфигурации, а не дыры
+в пакетах, поэтому базы уязвимостей у него нет и соответствующих флагов тоже
+нет. Проверено на живом бинаре.
+
+Первая команда `sarbar offline <цель>` скачивает базу уязвимостей в
+`~/.cache/trivy`. Дальше сканирование идёт полностью по локальной копии.
+
+Проверка без сети вообще — сеть отключается ядром, а не флагом:
 
 ```bash
-sarbar scan ./examples/vuln-app --engine none --no-mock
+unshare -rn sarbar offline ./examples/vuln-app
 ```
+
+Если базы нет или она недоступна, прогон получает `DEGRADED` и `FAIL` с
+диагностикой, а не тихий успех.
 
 ---
 
@@ -430,21 +497,31 @@ runtime-сканом**. Адаптер запускает Falco в ограни�
 
 ---
 
-## Собственные проверки (sarbar-checks)
+## Почему в sarbar нет своих проверок
 
-Чистый Python, без сети и без CVE-базы. Выполняются всегда, если
-`run_cast_checks` включён в профиле.
+Раньше в проекте был модуль `sarbar/checks` — собственные правила на чистом
+Python: ошибки Dockerfile, поиск секретов, разбор настроек запущенного
+контейнера. Он удалён целиком.
 
-| ID | Проверка | Серьёзность |
-|---|---|---|
-| CAST-DOCKER-001…007 | `ADD` вместо `COPY`, непинованный тег, запуск от root (нет `USER`), `apt-get` без чистки, секреты в `ENV/ARG`, нет `HEALTHCHECK`, установлен `sudo` | LOW…HIGH |
-| CAST-SECRET-001…005 | AWS-ключи, приватные ключи, GitHub-токены, пароли в присваиваниях, generic API-токены | MEDIUM…HIGH |
-| CAST-RT-001…009 | `--privileged`, root, опасные capabilities, host-сеть, `docker.sock`, host PID, host IPC, отключённый AppArmor/seccomp, writable rootfs | LOW…CRITICAL |
+Причина: trivy уже делает ровно то же самое. Дублирование означало второе
+мнение, которое может disagrees с первым, а от расхождения между «своим» и
+«чужим» выводом страдает тот, кто читает отчёт.
 
-Секрет-сканер помнит **все** вхождения: 40 совпадений в 40 файлах дают одну
-находку с пометкой `x40 locations`, а не одну находку с именем случайного
-файла. Любое усечение охвата (лимит файлов, бинарники, слишком большие файлы)
-попадает в `diagnostics`.
+Что из этого следует, и это зафиксировано инвариантами:
+
+| Инвариант | Что запрещает |
+|---|---|
+| I-13 | выдуманные данные в отчёте |
+| I-16 | любые собственные правила; каждый ID в отчёте принадлежит сканеру |
+
+Что при этом теряется, стоит сказать честно: анализ **настроек** запущенного
+контейнера (`--privileged`, root, `docker.sock`, опасные capabilities). Ни один
+из четырёх сканеров этого не делает. Falco ловит не конфигурацию, а поведение
+(кто запустил шелл, кто полез в `/etc/shadow`), и предупреждения вида «у тебя
+контейнер запущен с `--privileged`» сегодня не выдаёт никто.
+
+Анализ **содержимого** образа и каталога не пострадал вовсе — его полностью
+делает trivy.
 
 ---
 
@@ -465,9 +542,8 @@ sarbar/
 │   ├── history.py        # SQLite-журнал
 │   ├── cli.py            # CLI
 │   ├── setup.py          # sarbar setup
-│   ├── checks/           # sarbar-checks
-│   ├── engines/          # адаптеры + mock
-│   └── policies/         # *.yaml — профили (внутри пакета)
+│   ├── engines/          # адаптеры trivy / grype / dockle / falco
+│   └── policies/         # *.yaml — профили, внутри пакета (инвариант I-11)
 ├── tests/                # pytest
 ├── examples/vuln-app/    # намеренно дырявый пример
 ├── install.sh            # установка одной командой (нужен root)

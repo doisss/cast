@@ -254,11 +254,21 @@ def run_scan(target: Target, pol: Policy, forced_engine: str | None = None,
             # "pass" here would mean a typo turns a build green.
             verdict = "fail"
             reasons.append("target could not be resolved, so nothing was analysed")
-        elif causes and verdict == "pass" and getattr(pol, "fail_on_degraded", False):
+        elif getattr(pol, "fail_on_degraded", False):
+            # Unconditional on purpose. An earlier version also required `causes`
+            # to be non-empty, which let `-e none` through as PASS: with no
+            # scanner requested, none is attempted, so no diagnostic is produced
+            # and `causes` stayed empty. Asking for zero scanners is not a reason
+            # to hand out a green light. The profile that legitimately wants no
+            # gates is `report`, which sets fail_on_degraded to false.
             verdict = "fail"
-            reasons.append("no scanner produced results and the policy requires "
-                           "at least one working scanner")
-        if causes or target_error:
+            if causes:
+                reasons.append("no scanner produced results and the policy "
+                               "requires at least one working scanner")
+            else:
+                reasons.append("no scanner was requested, so nothing was "
+                               "analysed")
+        if causes or target_error or not scanners_used:
             reasons.append("DEGRADED: no scanner produced results")
 
     warnings: list[str] = []
