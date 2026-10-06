@@ -92,16 +92,20 @@ fetch_sources() {
    Set it at the top of this script, or override it:
        SARBAR_REPO=owner/name bash install.sh"
     fi
-    local tarball tmp
+    local tarball
     tarball="https://codeload.github.com/${repo}/tar.gz/${ref}"
     echo "  source  : ${repo}@${ref}"
     echo ""
     echo "[0/5] Fetching the sources"
-    tmp="$(mktemp -d)"
-    trap 'rm -rf "$tmp"' EXIT
     if ! command -v curl >/dev/null 2>&1; then
         die "curl is required to fetch the sources"
     fi
+    # WORKDIR, not a local: an EXIT trap that names a local fires after the
+    # function has returned, and under `set -u` that aborts with
+    # "tmp: unbound variable" — after a completely successful install.
+    WORKDIR="$(mktemp -d)"
+    trap 'rm -rf "${WORKDIR:-}"' EXIT
+    local tmp="$WORKDIR"
     curl -fsSL --retry 3 --max-time 180 "$tarball" -o "$tmp/src.tar.gz" \
         || die "could not download $tarball
    Check the repository name and that the ref '$ref' exists."
