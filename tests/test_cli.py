@@ -209,10 +209,30 @@ def test_report_written_to_file_for_every_format(clean, capsys):
         assert probe in dest.read_bytes(), fmt
 
 
-def test_console_format_honours_output(tmp_path, capsys, monkeypatch):
+def test_console_format_honours_output(tmp_path, capsys, monkeypatch, stub_binary):
+    """The console report must reach the file, and the IDs must be the
+    scanner's, not ours.
+
+    A stub trivy stands in for the real one. Without it this test silently
+    depended on whatever trivy happened to be installed on the machine running
+    it, and failed outright on a clean machine.
+    """
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     df = tmp_path / "Dockerfile"
     df.write_text(VULN_DOCKERFILE)
+
+    fake = stub_binary(
+        "#!/bin/sh\n"
+        # SchemaVersion is the marker the adapter requires before it will treat
+        # the output as a report at all; without it the run is reported failed.
+        "cat <<'JSON'\n"
+        '{"SchemaVersion":2,"Results":[{"Target":"Dockerfile",'
+        '"Misconfigurations":[{"ID":"DS-0001","Title":"Pin a version",'
+        '"Severity":"HIGH","Status":"FAIL","Message":"m"}]}]}\n'
+        "JSON\n", "trivy")
+    monkeypatch.setattr("sarbar.engines.TrivyEngine.resolve",
+                        lambda self: fake)
+
     dest = tmp_path / "console.txt"
     main(["scan", str(df), "-e", "trivy", "-f", "console",
           "-o", str(dest), "--no-history"])

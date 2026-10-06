@@ -408,6 +408,17 @@ class DockleEngine(Engine):
         return out
 
 
+# Where falco 0.45 looks for its plugins, in order. A per-user install cannot
+# write to the first two, which is why the adapter passes an absolute
+# library_path instead of relying on the search order.
+FALCO_PLUGIN_DIRS = (
+    "/usr/share/falco/plugins",
+    "/usr/local/share/falco/plugins",
+    "~/.local/share/falco/plugins",
+    "~/.sarbar/share/falco/plugins",
+)
+
+
 class FalcoEngine(Engine):
     """Falco runtime behaviour monitoring.
 
@@ -531,12 +542,11 @@ class FalcoEngine(Engine):
         ]
         return cmd
 
-    PLUGIN_DIRS = (
-        "/usr/share/falco/plugins",
-        "/usr/local/share/falco/plugins",
-        "~/.local/share/falco/plugins",
-        "~/.sarbar/share/falco/plugins",
-    )
+    # Kept as a class attribute purely as an injection seam: the test suite
+    # redirects it into a temp directory so it never reads or writes the real
+    # home. The shipped value lives in the module constant below, which is what
+    # should be asserted on.
+    PLUGIN_DIRS = FALCO_PLUGIN_DIRS
 
     @classmethod
     def container_plugin(cls) -> str | None:

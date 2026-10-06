@@ -5,7 +5,10 @@ dist/
 build/
 .venv/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
 .coverage
+coverage.xml
 htmlcov/
 TEST_REPORT.html
 *.sarif
@@ -19,3 +22,9 @@ TEST_REPORT.html
 /report.sarif
 /report.txt
 /report.xml
+
+# SPEC.md is the internal engineering log: session-by-session decisions, dead
+# ends and measurements. It is deliberately not part of the published project,
+# where it would be noise for a reader who only wants to use the tool. It stays
+# on disk for the author and is never committed.
+SPEC.md

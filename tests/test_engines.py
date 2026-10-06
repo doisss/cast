@@ -274,8 +274,14 @@ def test_engine_result_ok_predicate():
     assert not EngineResult(status=STATUS_UNAVAILABLE).ok
 
 
-def test_falco_command_has_no_removed_flag():
-    """Regression: -A was removed in Falco 0.42 and made it exit immediately."""
+def test_falco_command_has_no_removed_flag(stub_binary, monkeypatch):
+    """Regression: -A was removed in Falco 0.42 and made it exit immediately.
+
+    `resolve` is stubbed so the assertion does not depend on a falco being
+    installed on the machine running the suite.
+    """
+    monkeypatch.setattr(FalcoEngine, "resolve",
+                        lambda self: stub_binary("#!/bin/sh\necho v\n", "falco"))
     e = FalcoEngine()
     argv = e.build_command(seconds=7) or []
     assert "-A" not in argv
@@ -350,9 +356,11 @@ def test_trivy_db_presence_check(tmp_path, monkeypatch):
 
 # ---------------------------------------------------------------- falco + sudo
 
-def test_falco_asks_for_root_and_says_how_to_get_it(tmp_path, monkeypatch):
+def test_falco_asks_for_root_and_says_how_to_get_it(stub_binary, monkeypatch):
     """No root, no sudo: say so instead of pretending the container was clean."""
     monkeypatch.setattr(FalcoEngine, "running_as_root", staticmethod(lambda: False))
+    monkeypatch.setattr(FalcoEngine, "resolve",
+                        lambda self: stub_binary("#!/bin/sh\necho v\n", "falco"))
     monkeypatch.setattr(FalcoEngine, "authorise_sudo",
                         staticmethod(lambda: (False, "the password was not accepted")))
     res = FalcoEngine().run("c1", "container")
@@ -363,8 +371,10 @@ def test_falco_asks_for_root_and_says_how_to_get_it(tmp_path, monkeypatch):
     assert "--no-sudo" in res.detail
 
 
-def test_falco_no_sudo_flag_skips_the_prompt(tmp_path, monkeypatch):
+def test_falco_no_sudo_flag_skips_the_prompt(stub_binary, monkeypatch):
     monkeypatch.setattr(FalcoEngine, "running_as_root", staticmethod(lambda: False))
+    monkeypatch.setattr(FalcoEngine, "resolve",
+                        lambda self: stub_binary("#!/bin/sh\necho v\n", "falco"))
 
     def explode():
         raise AssertionError("--no-sudo must not trigger a password prompt")
@@ -498,7 +508,7 @@ def test_container_plugin_is_found_where_we_installed_it(tmp_path, monkeypatch):
     real ~/.local/share here would let the test create or delete a file in the
     user's actual installation, which has already happened twice in this project.
     """
-    plugins = tmp_path / "share" / "falco" / "plugins"
+    plugins = tmp_path / "elsewhere" / "falco" / "plugins"
     plugins.mkdir(parents=True)
     target = str(plugins / "libcontainer.so")
     open(target, "wb").close()
@@ -507,11 +517,25 @@ def test_container_plugin_is_found_where_we_installed_it(tmp_path, monkeypatch):
 
 
 def test_container_plugin_search_list_covers_both_layouts():
-    """Both the system location and the per-user one must be searched."""
-    dirs = FalcoEngine.PLUGIN_DIRS
-    assert "/usr/share/falco/plugins" in dirs
-    assert any(d.endswith("/share/falco/plugins") and "usr/bin" not in d
-               for d in dirs), dirs
+    """The shipped search list must name the system location and the user one.
+
+    The literal value is asserted rather than reading the class attribute,
+    because the autouse fixture redirects that attribute into a temp directory —
+    so reading it here would test the fixture, not the shipped default.
+    """
+    import sarbar.engines as eng
+    shipped = eng.FALCO_PLUGIN_DIRS
+    assert "/usr/share/falco/plugins" in shipped
+    assert "/usr/local/share/falco/plugins" in shipped
+    assert any(d.startswith("~/") and d.endswith("/share/falco/plugins")
+               for d in shipped), shipped
+    # The class attribute exists only as an injection seam, so what it currently
+    # holds is whatever the fixture put there. What matters is that the shipped
+    # constant is what the production default was built from.
+    import inspect
+    body = inspect.getsource(FalcoEngine)
+    assert "PLUGIN_DIRS = FALCO_PLUGIN_DIRS" in body, \
+        "FalcoEngine.PLUGIN_DIRS must default to the shipped constant"
 
 
 # --------------------------------------- offline flags differ per subcommand
