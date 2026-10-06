@@ -6,8 +6,9 @@ Name origin: Old Norse 'sár' (wound/vulnerability) + 'barr' (bare/exposed)
 CAST — Container Automated Security Testing
 Orchestrator + policy + report over existing scanners (trivy, falco, grype, dockle).
 
-See SPEC.md for the specification, the invariants this code must uphold, and the
-changelog.
+The version is read from the installed package metadata rather than hard-coded.
+Two copies of the number existed and had already drifted: the wheel said one
+thing and `sarbar -v` another, so a bug report could not be matched to a release.
 """
 from sarbar.model import Finding, normalize_severity
 from sarbar.normalize import correlate, dedup, normalize_all
@@ -25,4 +26,22 @@ __all__ = [
     "Policy", "BUILTIN_PROFILES", "load_profile",
 ]
 
-__version__ = "0.4.1"
+def _detect_version() -> str:
+    try:
+        from importlib.metadata import version as _v
+        return _v("sarbar")
+    except Exception:
+        # Running from a source checkout without an install.
+        import pathlib
+        here = pathlib.Path(__file__).resolve().parent.parent
+        for candidate in (here / "pyproject.toml", here / ".." / "pyproject.toml"):
+            try:
+                for line in candidate.read_text().splitlines():
+                    if line.startswith("version ="):
+                        return line.split("=", 1)[1].strip().strip('"\'')
+            except OSError:
+                continue
+        return "0.0.0+unknown"
+
+
+__version__ = _detect_version()

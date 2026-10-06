@@ -38,3 +38,24 @@ jobs:
 
       - name: The installer must be syntactically valid
         run: bash -n install.sh && bash -n uninstall.sh
+
+      - name: The built wheel must report the version in pyproject.toml
+        run: |
+          # The version used to exist in two places and drifted apart, so
+          # `sarbar -v` disagreed with the release a user had installed. Only a
+          # real build can prove the two agree.
+          pip install build
+          python -m build --wheel
+          python - <<'PY'
+          import glob, sys, zipfile, tomllib, pathlib
+          wheel = glob.glob("dist/*.whl")[0]
+          declared = tomllib.loads(pathlib.Path("pyproject.toml").read_text())
+          with zipfile.ZipFile(wheel) as z:
+              meta = [n for n in z.namelist() if n.endswith("METADATA")][0]
+              version = [l for l in z.read(meta).decode().splitlines()
+                         if l.startswith("Version:")][0].split(":", 1)[1].strip()
+          assert version == declared["project"]["version"], (
+              f"wheel says {version}, pyproject says "
+              f"{declared['project']['version']}")
+          print(f"wheel version matches pyproject.toml: {version}")
+          PY

@@ -484,8 +484,15 @@ def install_falco(lay: Layout, force: bool = False) -> str:
                 f"will still ask for /etc/falco/falco.yaml")
     missing = _falco_missing(lay)
     linked, where = _publish(dest, "falco", lay)
+    # falcoctl is published as a command too: it is how a user loads or unloads
+    # the driver, so hiding it in ~/.sarbar/bin would leave the only supported way
+    # to manage the driver looking like a missing file.
+    ctl_linked, _ = _publish(ctl, "falcoctl", lay)
     if not linked:
         return f"ok ({detail}) but could not publish: {where}"
+    if not ctl_linked:
+        return (f"ok ({detail}) but could not publish falcoctl; "
+                f"`sarbar setup --driver` still works, it finds it in place")
     if missing:
         return (f"partial: {detail} -> {where}, but missing {', '.join(missing)}. "
                 f"falco cannot fully watch containers without them")

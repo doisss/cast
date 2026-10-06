@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 
@@ -310,3 +311,37 @@ def test_setup_is_dispatched_with_its_own_arguments(monkeypatch, capsys):
     monkeypatch.setattr(real, "run_setup", fake)
     assert main(["setup", "--only", "falco"]) == 0
     assert seen["argv"] == ["--only", "falco"]
+
+def test_version_is_not_hard_coded_twice():
+    """Two copies of the version had already drifted.
+
+    The wheel said one thing and `sarbar -v` another, so a bug report could not
+    be matched to a release. The number must be derived, never written a second
+    time. That the built wheel agrees with pyproject.toml is checked in CI, where
+    a build actually happens — comparing against locally installed metadata here
+    would only report a stale developer install.
+    """
+    import pathlib
+
+    import sarbar
+
+    source = pathlib.Path(sarbar.__file__).read_text()
+    assert re.search(r'__version__\s*=\s*["\']', source) is None, \
+        "the version must not be a second hard-coded copy"
+
+
+def test_version_looks_like_a_version_not_a_placeholder():
+    import sarbar
+
+    assert re.match(r"^\d+\.\d+\.\d+", sarbar.__version__), sarbar.__version__
+
+
+def test_version_is_reported_by_the_command(capsys):
+    import sarbar
+
+    with pytest.raises(SystemExit) as exit_info:
+        main(["-v"])
+    assert exit_info.value.code == 0
+    out = capsys.readouterr().out
+    assert "sarbar" in out
+    assert sarbar.__version__ in out, "the printed version must be the real one"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sarbar"
-version = "0.5.0"
+version = "0.5.2"
 description = "CAST — Container Automated Security Testing: orchestrator + policy + report over existing scanners"
 readme = "README.md"
 requires-python = ">=3.10"
