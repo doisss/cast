@@ -15,10 +15,10 @@ for Security, нормализует их разнородный вывод к �
 Docker Bench for Security; Docker сам не ставит (только подсказывает), если его нет:
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/cast/main/install.sh)
+bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh)
 ```
 
-(`OWNER` замените на свой аккаунт GitHub.) Раскладка по правилам Linux:
+Раскладка по правилам Linux:
 
 | Что | Куда |
 |---|---|
