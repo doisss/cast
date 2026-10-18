@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cast"
+version = "0.1.0"
+description = "Оболочка-оркестратор над сканерами безопасности контейнеров (Trivy, Docker Bench и др.)"
+requires-python = ">=3.11"
+dependencies = [
+    "rich>=13.0",
+    "jinja2>=3.1",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+# Основное имя — cast, sarbar — алиас. Оба указывают на одну и ту же функцию.
+[project.scripts]
+cast = "cast.cli:entry_point"
+sarbar = "cast.cli:entry_point"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Шаблон HTML-отчёта должен попадать в установленный пакет (иначе --format html падает).
+[tool.setuptools.package-data]
+cast = ["report/templates/*.jinja"]

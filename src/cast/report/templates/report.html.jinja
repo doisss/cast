@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Отчёт cast — {{ result.image }}</title>
+<style>
+  :root { color-scheme: light; }
+  body { font-family: -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; padding: 2rem;
+         background: #f7f7f8; color: #1b1b1f; }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: #666; margin-bottom: 1.5rem; }
+  .summary { display: flex; gap: .75rem; margin-bottom: 1.5rem; flex-wrap: wrap; }
+  .pill { padding: .35rem .75rem; border-radius: 999px; font-size: .85rem; font-weight: 600; }
+  .critical { background: #fde2e1; color: #a0191a; }
+  .high { background: #fde8d6; color: #a04b00; }
+  .medium { background: #fdf3cf; color: #816400; }
+  .low { background: #e9e9eb; color: #555; }
+  table { width: 100%; border-collapse: collapse; background: #fff; border-radius: 10px;
+          overflow: hidden; box-shadow: 0 1px 2px rgba(0,0,0,.06); }
+  th, td { padding: .6rem .8rem; text-align: left; font-size: .9rem; border-bottom: 1px solid #ececec; }
+  th { background: #efeff1; font-weight: 600; }
+  td { vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  .badge { display: inline-block; padding: .15rem .5rem; border-radius: 6px; font-size: .78rem; font-weight: 600; }
+  .skipped { margin-bottom: 1rem; color: #a04b00; font-size: .9rem; }
+  .WARN { background: #fde2e1; color: #a0191a; }
+  .NOTE { background: #fdf3cf; color: #816400; }
+  .INFO { background: #dff1fb; color: #0b5d83; }
+  .PASS { background: #dff3e3; color: #1b6b32; }
+  h2 { font-size: 1.1rem; margin: 1.8rem 0 .5rem; }
+  .banner { background: #fde2e1; color: #a0191a; padding: .8rem 1rem; border-radius: 8px; font-weight: 600; margin: 1rem 0; }
+  .note { background: #fdf3cf; color: #5c4a00; padding: .6rem 1rem; border-radius: 8px; margin: 1rem 0; font-size: .9rem; }
+  .reasons { color: #888; font-size: .78rem; }
+</style>
+</head>
+<body>
+
+<h1>Отчёт о сканировании безопасности</h1>
+<p class="sub">Цель: <strong>{{ result.image }}</strong> &middot; сгенерировано cast</p>
+
+<div class="skipped">
+  {% for r in result.runs %}
+    {{ "✓" if r.status == "ok" else "✗" }} {{ r.name }} —
+    {% if r.status == "ok" %}готово, записей: {{ r.findings }}{% else %}НЕ ВЫПОЛНЕН: {{ r.detail }}{% endif %}<br>
+  {% endfor %}
+</div>
+
+{% if result.image_scan_failed %}
+<div class="banner">Проверка НЕ выполнена: главный движок для этой цели не отработал. Это не значит, что всё в порядке.</div>
+{% endif %}
+
+{% for sec in sections %}
+<h2>{{ sec.title }} <span style="font-weight:400;color:#777;font-size:.85rem">({{ sec.tool }}{% if sec.extra %}, {{ sec.extra }}{% endif %})</span></h2>
+{% if sec.kind == "status" %}
+  <div class="summary">
+    {% for st in ["PASS", "WARN", "INFO", "NOTE"] %}
+      <span class="pill {{ st }}">{{ st }}: {{ status_counts[st] }}</span>
+    {% endfor %}
+  </div>
+  {% set rows = sec.findings %}
+  {% if rows %}
+  <table>
+    <thead><tr><th>Статус</th><th>ID</th><th>Проверка</th><th>К чему относится</th><th>Что сделать</th></tr></thead>
+    <tbody>
+    {% for f in rows %}
+      <tr>
+        <td><span class="badge {{ f.status }}">{{ f.status }}</span></td>
+        <td>{{ f.check_id }}</td>
+        <td>{{ f.title }}</td>
+        <td>{{ f.details | join("; ") }}</td>
+        <td>{{ f.remediation or "" }}{% if f.remediation_impact %}<div class="reasons">Чем грозит: {{ f.remediation_impact }}</div>{% endif %}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>Docker Bench не вернул ни одной проверки.</p>{% endif %}
+{% else %}
+  <div class="summary">
+    {% for sev in ["critical", "high", "medium", "low"] %}
+      {% set n = sec.findings | selectattr("severity.value", "equalto", sev) | list | length %}
+      {% if n %}<span class="pill {{ sev }}">{{ sev|upper }}: {{ n }}</span>{% endif %}
+    {% endfor %}
+  </div>
+  {% if sec.findings %}
+  <table>
+    <thead><tr><th>ID</th><th>Пакет</th><th>Установлена</th><th>Исправлено в</th><th>Название</th><th>Где</th><th>Приоритет</th><th>Источник</th></tr></thead>
+    <tbody>
+    {% for f in sec.findings %}
+      <tr>
+        <td>{{ f.check_id }}</td>
+        <td>{{ f.package or "—" }}</td>
+        <td>{{ f.installed_version or "—" }}</td>
+        <td>{{ f.fixed_version or "—" }}</td>
+        <td>
+          <span class="badge {{ f.severity.value }}">{{ f.severity.value|upper }}</span>
+          {{ f.title }}
+          {% if f.remediation %}<div class="reasons">Как исправить: {{ f.remediation }}</div>{% endif %}
+          {% if f.url %}<div class="reasons"><a href="{{ f.url }}">{{ f.url }}</a></div>{% endif %}
+          <div class="reasons">{{ f.priority_reasons|join("; ") }}</div>
+        </td>
+        <td>{{ f.location or "—" }}</td>
+        <td>{{ f.priority_score }}</td>
+        <td>{{ f.confirmed_by|join(", ") }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}<p>Проблем не найдено.</p>{% endif %}
+{% endif %}
+{% endfor %}
+
+{% if note %}<div class="note">{{ note }}</div>{% endif %}
+
+</body>
+</html>

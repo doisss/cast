@@ -1,0 +1,4 @@
+# Пример requirements.txt для демонстрации --requirements
+requests==2.25.0
+flask>=2.0
+xz-utils==5.4.1
