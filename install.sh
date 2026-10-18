@@ -99,7 +99,12 @@ run() {
 priv() { run ${SUDO[@]+"${SUDO[@]}"} "$@"; }
 
 TMP=""
-cleanup() { [ -n "$TMP" ] && rm -rf "$TMP"; return 0; }
+cleanup() {
+    [ -n "$TMP" ] || return 0
+    # pip под sudo мог создать в папке сборки файлы root — тогда удаляем тоже от root
+    rm -rf "$TMP" 2>/dev/null || "${SUDO[@]}" rm -rf "$TMP" 2>/dev/null || true
+    return 0
+}
 trap cleanup EXIT
 TMP="$(mktemp -d)"
 
