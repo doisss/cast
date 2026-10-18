@@ -3,9 +3,9 @@
 # cast — установщик. Одна команда ставит саму утилиту и сканеры, которыми она
 # пользуется под капотом.
 #
-#   bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/cast/main/install.sh)
+#   bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh)
 #
-# (OWNER замените на имя вашего аккаунта на GitHub — см. README.)
+# (Для форка: CAST_REPO=аккаунт/репозиторий.)
 #
 # Из локальной копии репозитория (удобно проверять до публикации):
 #
@@ -28,7 +28,7 @@
 #
 set -euo pipefail
 
-REPO="${CAST_REPO:-OWNER/cast}"
+REPO="${CAST_REPO:-doisss/cast}"
 REF="${CAST_REF:-main}"
 DB_REF="${DOCKER_BENCH_REF:-v1.6.1}"
 ARCHIVE_URL="${CAST_ARCHIVE_URL:-}"
@@ -50,7 +50,7 @@ usage() {
     cat <<'EOF'
 cast — установщик (cast + Trivy + Docker Bench).
 
-  bash <(curl -fsSL https://raw.githubusercontent.com/OWNER/cast/main/install.sh)
+  bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh)
   bash install.sh --local          из локальной копии репозитория
 
 Опции:
@@ -63,7 +63,7 @@ cast — установщик (cast + Trivy + Docker Bench).
   --dry-run            ничего не менять, только показать, что было бы сделано
   -h, --help           эта справка
 
-Переменные: CAST_REPO (OWNER/REPO), CAST_REF, CAST_ARCHIVE_URL, DOCKER_BENCH_REF, DOCKER_BENCH_URL.
+Переменные: CAST_REPO (аккаунт/репозиторий, по умолчанию doisss/cast), CAST_REF, CAST_ARCHIVE_URL, DOCKER_BENCH_REF, DOCKER_BENCH_URL.
 EOF
 }
 
@@ -124,11 +124,6 @@ if ! "$PY" -c 'import venv, ensurepip' >/dev/null 2>&1; then
     else
         die "в вашем Python нет модуля venv; поставьте его средствами дистрибутива"
     fi
-fi
-
-if [ "$LOCAL" -eq 0 ] && [ -z "$ARCHIVE_URL" ] && [ "$REPO" = "OWNER/cast" ]; then
-    die "не задан репозиторий. Замените OWNER в адресе установки на свой аккаунт GitHub, \
-либо задайте CAST_REPO=аккаунт/репозиторий, либо используйте --local"
 fi
 
 # ------------------------------------------------------------ Docker

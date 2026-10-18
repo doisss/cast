@@ -26,10 +26,10 @@ def test_dry_run_local_changes_nothing():
     assert "dry-run" in r.stdout
 
 
-def test_refuses_placeholder_repo():
-    r = run()
-    assert r.returncode != 0
-    assert "OWNER" in (r.stdout + r.stderr)
+def test_default_repo_is_set_and_not_a_placeholder():
+    text = SCRIPT.read_text(encoding="utf-8")
+    assert "OWNER" not in text
+    assert 'REPO="${CAST_REPO:-doisss/cast}"' in text
 
 
 def test_unknown_option():
