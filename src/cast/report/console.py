@@ -35,6 +35,9 @@ _SEVERITY_ICON = {
 
 _STATUS_STYLE = {"WARN": "bold red", "NOTE": "yellow", "INFO": "cyan", "PASS": "green"}
 
+# цели, где важно, в каком файле или ресурсе найдено (у образа место одно — сам образ)
+_SHOW_WHERE = ("fs", "dockerfile", "config", "rootfs", "repo", "vm", "cluster")
+
 _SCOPE_LABEL = {"image": "уязвимости и проблемы", "environment": "настройки Docker"}
 
 
@@ -60,6 +63,13 @@ def _severity_line(findings, section: Section) -> Text:
                 f"{_SEVERITY_ICON[sev]} {sev.upper()}: {counts[sev]}   ",
                 style=_SEVERITY_STYLE[sev],
             )
+    if section.raw_count > len(findings):
+        line.append(
+            f"\n{section.tool} вернул записей: {section.raw_count}. Одна и та же уязвимость "
+            "в одном пакете, найденная в нескольких файлах, показана одной строкой, "
+            "все места — в колонке «Где» (и в -f json / -f html).",
+            style="dim",
+        )
     return line
 
 
@@ -185,10 +195,13 @@ def _print_section(console: Console, result: ScanResult, section: Section, top: 
         console.print(_severity_line(section.findings, section))
         if section.findings:
             _print_severity_table(console, section.findings, top,
-                                  show_where=result.kind in ("fs", "dockerfile"))
+                                  show_where=result.kind in _SHOW_WHERE
+                                  or section.raw_count > len(section.findings))
             if any(f.severity.value == "unknown" for f in section.findings):
                 console.print("[dim]❓ UNKNOWN — Trivy не указал уровень критичности "
                               "(так бывает у свежих записей и у баз вроде Debian Security Tracker).[/dim]")
+        elif section.note:
+            console.print(Text(section.note, style="yellow"))
         else:
             console.print("[green]Проблем не найдено.[/green]")
     console.print()

@@ -52,3 +52,12 @@ def test_case_insensitive_dedup_key():
     ]
     result = deduplicate(findings)
     assert len(result) == 1
+
+
+def test_same_cve_in_several_files_keeps_every_location():
+    def vuln(where):
+        return Finding("trivy", "CVE-1", "t", Severity.HIGH, package="stdlib", location=where)
+
+    merged = deduplicate([vuln("usr/bin/a"), vuln("usr/bin/b"), vuln("usr/bin/a")])
+    assert len(merged) == 1
+    assert merged[0].location == "usr/bin/a; usr/bin/b"

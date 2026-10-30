@@ -61,3 +61,15 @@ def test_docker_permission_error_is_explained_humanly():
 
 def test_unknown_image_error_is_explained():
     assert "образ не найден" in _explain_failure(1, 'unable to find the specified image "x:1"')
+
+
+def test_vulnerability_location_prefers_package_path():
+    import json
+    raw = json.dumps({"Results": [{"Target": "Python", "Type": "python-pkg", "Vulnerabilities": [
+        {"VulnerabilityID": "CVE-1", "PkgName": "pip", "Severity": "LOW",
+         "PkgPath": "opt/a/venv/lib/site-packages/pip-25.0.dist-info/METADATA"},
+        {"VulnerabilityID": "CVE-2", "PkgName": "zlib", "Severity": "LOW"},
+    ]}]})
+    findings = TrivyScanner()._parse(raw)
+    assert findings[0].location.startswith("opt/a/venv")
+    assert findings[1].location == "Python"

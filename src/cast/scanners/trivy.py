@@ -14,6 +14,7 @@ import os
 import re
 import shutil
 import subprocess
+import tarfile
 import threading
 import tempfile
 from datetime import datetime, timezone
@@ -41,6 +42,16 @@ def _explain_failure(returncode: int, stderr: str) -> str:
         )
     low = text.lower()
     if "no space left on device" in low:
+        where = re.search(r"(/\S+?):? no space left on device", text)
+        tmp = os.environ.get("TMPDIR") or "/tmp"
+        if where and where.group(1).startswith(tmp.rstrip("/") + "/"):
+            # при проверке rootfs и ВМ Trivy распаковывает файлы во временную папку,
+            # а /tmp часто маленький tmpfs
+            return (
+                f"закончилось место во временной папке {tmp} (Trivy пишет туда при проверке: "
+                f"{where.group(1)}). Проверьте df -h {tmp} и запустите с временной папкой на "
+                "большом диске: TMPDIR=~/tmp-trivy cast scan ... (папку создайте заранее)"
+            )
         return (
             "на диске закончилось место. Trivy хранит базу уязвимостей в "
             "/var/cache/cast/trivy или ~/.cache/trivy (нужно около 1 ГБ свободно). Проверьте df -h, "
@@ -60,8 +71,31 @@ def _explain_failure(returncode: int, stderr: str) -> str:
                 "Повторите запуск: уже скачанные слои и база берутся из кэша")
     if "unable to find the specified image" in text:
         return "образ не найден ни локально, ни в реестре — проверьте имя и тег"
+    if "kubeconfig" in low or "k8s cluster" in low or "kubernetes cluster" in low:
+        tail = " ".join(text.split())[-300:]
+        return ("нет доступа к кластеру Kubernetes (нет kubeconfig или кластер не отвечает; "
+                f"проверьте kubectl cluster-info). Trivy сообщил: {tail}")
     tail = " ".join(text.split())[-300:]
     return f"trivy завершился с кодом {returncode}: {tail}"
+
+
+def _is_oci_only_archive(path: Path) -> bool:
+    """В архиве есть index.json (OCI-layout), но нет manifest.json (как у docker save)."""
+    try:
+        with tarfile.open(path) as tar:
+            names = {m.name.lstrip("./") for m in tar.getmembers()}
+    except (tarfile.TarError, OSError, EOFError):
+        return False
+    return "index.json" in names and "manifest.json" not in names
+
+
+def _vuln_location(vuln: dict, resource: str | None, target_name: str | None) -> str | None:
+    """Где найден уязвимый пакет: PkgPath, если Trivy его дал (у rootfs все venv'ы с pip —
+    один Target «Python», различаются только путём), иначе Target."""
+    path = vuln.get("PkgPath")
+    if not path:
+        return target_name
+    return f"{resource}: {path}" if resource else path
 
 
 SHARED_CACHE = Path("/var/cache/cast/trivy")
@@ -158,6 +192,22 @@ def _download(cmd: list[str], on_progress, timeout: int = 1800) -> tuple[int, st
     return proc.wait(), last_text
 
 
+# Долгие цели: корень / или образ диска целиком Trivy за свои 5 минут по умолчанию
+# не успевает (на / он ещё и качает Java DB, если находит .jar). Им даём 30 минут.
+SLOW_KINDS = ("rootfs", "vm", "repo", "cluster")
+SLOW_TIMEOUT = "30m"
+
+
+def _wait_limit(cmd: list[str]) -> int:
+    """Сколько ждать Trivy, секунд: на 5 минут дольше его собственного --timeout
+    (чтобы ошибку о нехватке времени сообщил сам Trivy), без --timeout — 10 минут."""
+    if "--timeout" in cmd:
+        value = cmd[cmd.index("--timeout") + 1]
+        if value.endswith("m") and value[:-1].isdigit():
+            return int(value[:-1]) * 60 + 300
+    return 600
+
+
 def _exec(cmd: list[str], on_line=None) -> tuple[int, str, str]:
     """Запустить команду, читая stderr построчно. Возвращает (код, stdout, stderr).
     Ограничение по времени больше, чем у самого Trivy (у него по умолчанию 5 минут)."""
@@ -182,7 +232,7 @@ def _exec(cmd: list[str], on_line=None) -> tuple[int, str, str]:
     for th in threads:
         th.start()
     try:
-        proc.wait(timeout=600)
+        proc.wait(timeout=_wait_limit(cmd))
     except subprocess.TimeoutExpired:
         proc.kill()
         raise
@@ -232,11 +282,15 @@ def _shared_umask() -> None:
 class TrivyScanner(Scanner):
     name = "trivy"
     scope = "image"
-    targets = {"image", "fs", "dockerfile", "container"}
+    targets = {"image", "fs", "dockerfile", "container",
+               "archive", "config", "rootfs", "repo", "sbom", "vm", "cluster"}
     # Для контейнера Trivy по умолчанию не запускается (там главный — Docker Bench);
     # его можно добавить флагом -e trivy: тогда проверится образ этого контейнера.
-    default_targets = {"image", "fs", "dockerfile"}
-    description = "уязвимости в пакетах образа, зависимости и секреты в папке, ошибки Dockerfile"
+    default_targets = {"image", "fs", "dockerfile",
+                       "archive", "config", "rootfs", "repo", "sbom", "vm", "cluster"}
+    description = ("уязвимости в пакетах образа, зависимости и секреты в папке, ошибки "
+                   "конфигурации (Dockerfile, Kubernetes, Terraform, Helm, CloudFormation), "
+                   "SBOM, git-репозитории, корневые ФС, образы ВМ и кластер Kubernetes")
 
     progress_hint = "проверяю"
 
@@ -272,7 +326,12 @@ class TrivyScanner(Scanner):
         if target.kind == "dockerfile":
             self.ui.say("проверяю Dockerfile")
             return self._parse(self._scan_dockerfile(binary, Path(target.value).expanduser()))
-        if target.kind not in ("image", "container", "fs"):
+        if target.kind == "config":
+            # только ошибки конфигурации: база уязвимостей не нужна
+            self.ui.say(f"проверяю конфигурацию {target.value}")
+            return self._parse(self._run([binary, "config", "--quiet", "--format", "json",
+                                          str(Path(target.value).expanduser())]))
+        if target.kind not in self.targets:
             raise ScannerError(f"trivy не умеет проверять цель типа «{target.kind}»")
 
         # Сначала база уязвимостей — отдельным шагом и с настоящей полосой загрузки,
@@ -288,11 +347,39 @@ class TrivyScanner(Scanner):
             self.ui.say(f"открываю образ контейнера ({target.image_name})")
             # контейнер = его образ; ID образа точнее имени (тег мог уехать на другой образ)
             return self._parse(self._run_trivy(binary, target.image_ref or target.image_name))
-        self.ui.say(f"читаю файлы папки {target.value}")
-        # misconfig включаем явно, чтобы заодно проверялся Dockerfile внутри папки
-        cmd = [binary, "fs", "--format", "json", "--skip-db-update",
-               "--scanners", "vuln,secret,misconfig", target.value]
-        return self._parse(self._run(cmd))
+        if target.kind == "fs":
+            self.ui.say(f"читаю файлы папки {target.value}")
+            # misconfig включаем явно, чтобы заодно проверялся Dockerfile внутри папки
+            cmd = [binary, "fs", "--format", "json", "--skip-db-update",
+                   "--scanners", "vuln,secret,misconfig", target.value]
+            return self._parse(self._run(cmd))
+        # остальные цели — своей командой Trivy и с его набором проверок по умолчанию
+        what = {
+            "archive": f"открываю архив образа {target.value}",
+            "rootfs": f"читаю корневую ФС {target.value}",
+            "repo": f"скачиваю репозиторий {target.value}",
+            "sbom": f"проверяю пакеты из SBOM {target.value}",
+            "vm": f"открываю образ диска ВМ {target.value}",
+            "cluster": "опрашиваю кластер Kubernetes",
+        }[target.kind]
+        self.ui.say(what)
+        if target.kind == "archive" and _is_oci_only_archive(Path(target.value).expanduser()):
+            return self._parse(self._scan_oci_archive(binary, target))
+        return self._parse(self._run(self.command(binary, target)))
+
+    @staticmethod
+    def command(binary: str, target) -> list[str]:
+        """Команда Trivy для архива, rootfs, репозитория, SBOM, ВМ и кластера."""
+        common = ["--format", "json", "--skip-db-update"]
+        if target.kind in SLOW_KINDS:
+            common += ["--timeout", SLOW_TIMEOUT]
+        if target.kind == "archive":
+            return [binary, "image", *common, "--input", str(Path(target.value).expanduser())]
+        if target.kind == "cluster":
+            return [binary, "kubernetes", *common]
+        sub = {"rootfs": "rootfs", "repo": "repository", "sbom": "sbom", "vm": "vm"}[target.kind]
+        value = target.value if target.kind == "repo" else str(Path(target.value).expanduser())
+        return [binary, sub, *common, value]
 
     def _ensure_db(self, binary: str) -> None:
         if not _db_needs_update():
@@ -320,6 +407,18 @@ class TrivyScanner(Scanner):
             shutil.copy(path, Path(tmp) / name)
             return self._run([binary, "config", "--quiet", "--format", "json", tmp])
 
+    def _scan_oci_archive(self, binary: str, target) -> str:
+        """OCI-архив без manifest.json (podman save --format oci-archive, skopeo oci-archive:)
+        trivy image --input принимает только папкой. Распаковываем во временную папку."""
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                with tarfile.open(Path(target.value).expanduser()) as tar:
+                    tar.extractall(tmp, filter="data")
+            except (tarfile.TarError, OSError) as exc:
+                raise ScannerError(f"не удалось распаковать архив {target.value}: {exc}") from exc
+            cmd = self.command(binary, target)
+            return self._run([*cmd[:-1], tmp])
+
     def _run_trivy(self, binary: str, image: str) -> str:
         return self._run([binary, "image", "--format", "json", "--skip-db-update", image])
 
@@ -329,7 +428,11 @@ class TrivyScanner(Scanner):
         try:
             returncode, stdout, stderr = _exec(_with_cache(cmd), self._narrate)
         except subprocess.TimeoutExpired as exc:
-            raise ScannerError(f"trivy не ответил за отведённое время: {exc}") from exc
+            raise ScannerError(
+                f"trivy не уложился в {exc.timeout // 60:.0f} мин и был остановлен. "
+                "Для большой цели (например, корня /) это бывает: повторите, уже скачанное "
+                "берётся из кэша"
+            ) from exc
         except OSError as exc:
             raise ScannerError(f"не удалось запустить trivy: {exc}") from exc
         if returncode != 0:
@@ -347,11 +450,19 @@ class TrivyScanner(Scanner):
         except json.JSONDecodeError as exc:
             raise ScannerError(f"не удалось разобрать JSON от trivy: {exc}") from exc
 
+        # trivy kubernetes кладёт Results внутрь каждого ресурса кластера
+        results = [(None, r) for r in data.get("Results", []) or []]
+        for res in data.get("Resources", []) or []:
+            where = "/".join(p for p in (res.get("Namespace"), res.get("Kind"), res.get("Name")) if p)
+            results += [(where, r) for r in res.get("Results", []) or []]
+
         findings: list[Finding] = []
-        for result in data.get("Results", []) or []:
+        for resource, result in results:
             layer_digest = None
             pkg_type = result.get("Type")
             target_name = result.get("Target")
+            if resource:
+                target_name = f"{resource}: {target_name}" if target_name else resource
             for vuln in result.get("Vulnerabilities", []) or []:
                 layer = vuln.get("Layer") or {}
                 layer_digest = layer.get("Digest") or layer_digest
@@ -367,7 +478,7 @@ class TrivyScanner(Scanner):
                         fixed_version=vuln.get("FixedVersion"),
                         layer=layer_digest,
                         pkg_type=pkg_type,
-                        location=target_name,
+                        location=_vuln_location(vuln, resource, target_name),
                         url=vuln.get("PrimaryURL"),
                         fix_status=vuln.get("Status"),
                     )

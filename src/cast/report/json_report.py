@@ -18,7 +18,7 @@ def to_dict(result: ScanResult) -> dict:
     return {
         "image": result.image,
         "target": (
-            {"kind": target.kind, "value": target.value,
+            {"kind": target.kind, "value": target.value, "subtype": target.subtype,
              "container": target.container_name, "image": target.image_name}
             if target else None
         ),

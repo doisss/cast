@@ -81,6 +81,9 @@
       {% if n %}<span class="pill {{ sev }}">{{ sev|upper }}: {{ n }}</span>{% endif %}
     {% endfor %}
   </div>
+  {% if sec.raw_count > sec.findings|length %}
+  <p class="reasons">{{ sec.tool }} вернул записей: {{ sec.raw_count }}. Одна и та же уязвимость в одном пакете, найденная в нескольких файлах, показана одной строкой; все места — в колонке «Где».</p>
+  {% endif %}
   {% if sec.findings %}
   <table>
     <thead><tr><th>ID</th><th>Пакет</th><th>Установлена</th><th>Исправлено в</th><th>Название</th><th>Где</th><th>Приоритет</th><th>Источник</th></tr></thead>
@@ -105,6 +108,7 @@
     {% endfor %}
     </tbody>
   </table>
+  {% elif sec.note %}<p>{{ sec.note }}</p>
   {% else %}<p>Проблем не найдено.</p>{% endif %}
 {% endif %}
 {% endfor %}

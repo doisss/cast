@@ -30,6 +30,7 @@ class Section:
     seconds: float = 0.0
     summary: dict = field(default_factory=dict)  # итог движка: checks, score
     extra: str = ""          # пометка в скобках после движка, напр. стандарт проверки
+    raw_count: int = 0       # сколько записей вернул сам движок (до объединения одинаковых)
 
 
 def _natural(check_id: str) -> tuple:
@@ -56,7 +57,32 @@ def section_title(result: ScanResult, tool: str, scope: str) -> str:
         return f"Проверка Dockerfile {target.value}"
     if kind == "container":
         return f"Уязвимости образа контейнера {target.container_name}, образ {target.image_name}"
+    if kind == "archive":
+        return f"Уязвимости образа из архива {target.value}"
+    if kind == "config":
+        what = f" {target.subtype}" if target.subtype else ""
+        return f"Ошибки конфигурации{what} {target.value}"
+    if kind == "rootfs":
+        return f"Проблемы в корневой ФС {target.value}"
+    if kind == "repo":
+        return f"Проблемы в репозитории {target.value}"
+    if kind == "sbom":
+        what = f" ({target.subtype})" if target.subtype else ""
+        return f"Уязвимости пакетов из SBOM {target.value}{what}"
+    if kind == "vm":
+        return f"Уязвимости образа диска ВМ {target.value} (в Trivy экспериментально)"
+    if kind == "cluster":
+        return "Проблемы в кластере Kubernetes (в Trivy экспериментально)"
     return f"Уязвимости образа {target.value if target else result.image}"
+
+
+def empty_note(result: ScanResult) -> str:
+    """Что сказать вместо «Проблем не найдено», если пустой результат ничего не значит."""
+    target = result.target
+    if target and target.kind == "config" and target.subtype == "docker-compose":
+        return ("Trivy ничего не вернул: проверок для docker-compose в нём нет. "
+                "Это не значит, что ошибок нет.")
+    return ""
 
 
 def build_sections(result: ScanResult) -> list[Section]:
@@ -72,7 +98,8 @@ def build_sections(result: ScanResult) -> list[Section]:
                                     summary=run.summary))
         else:
             sections.append(Section(run.name, section_title(result, run.name, run.scope),
-                                    "severity", findings, seconds=run.seconds))
+                                    "severity", findings, seconds=run.seconds,
+                                    note=empty_note(result), raw_count=run.findings))
     return sections
 
 

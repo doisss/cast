@@ -59,12 +59,48 @@ cast scan host                   # Docker-хост → Docker Bench (CIS)
 cast engines                     # список движков, версии, что умеют
 ```
 
-**Как cast понимает цель.** Любое имя без `./` — образ. Путь, начинающийся с `.`, `./`,
-`../`, `/` или `~`, — папка. Файл `Dockerfile` (`Dockerfile.*`, `*.Dockerfile`,
-`Containerfile`) — Dockerfile. Hex-ID запущенного контейнера — контейнер. `host` — хост.
+Остальные команды Trivy доступны через тот же `cast scan`, без новых подкоманд:
+
+```bash
+cast scan deploy.yaml            # Kubernetes YAML → trivy config
+cast scan main.tf                # Terraform (.tf, .tf.json) → trivy config
+cast scan ./chart                # Helm-чарт (папка с Chart.yaml или сам Chart.yaml) → trivy config
+cast scan stack.yaml             # CloudFormation → trivy config
+cast scan docker-compose.yml     # → trivy config (проверок для compose в Trivy нет: отчёт пустой, cast так и пишет)
+cast scan alpine.tar             # архив образа (docker save; .tar/.tar.gz/.tgz) → trivy image --input
+cast scan sbom.cdx.json          # SBOM CycloneDX или SPDX (по содержимому) → trivy sbom
+cast scan /                      # корневая ФС (папка с etc/os-release) → trivy rootfs
+cast scan https://github.com/aquasecurity/trivy-ci-test   # git-репозиторий → trivy repository
+cast scan disk.qcow2             # образ диска ВМ (.vmdk/.qcow2/.vhd/.vhdx/.img/.raw) → trivy vm (экспериментально в Trivy)
+cast scan cluster                # кластер Kubernetes из текущего kubeconfig → trivy kubernetes (экспериментально в Trivy)
+```
+
+Каждая цель проверяется тем набором проверок, который Trivy включает для своей команды по
+умолчанию (для `trivy fs` cast, как и раньше, добавляет `misconfig`). OCI-архив без
+`manifest.json` (например, `podman save --format oci-archive`) cast распаковывает во временную
+папку: `trivy image --input` принимает такой формат только папкой.
+
+Корневая ФС, образ ВМ, репозиторий и кластер проверяются долго, поэтому для них cast
+передаёт Trivy `--timeout 30m` (по умолчанию у Trivy 5 минут). На корне `/` Trivy, найдя
+`.jar`, ещё и скачивает Java DB (больше 700 МБ) во временную папку; если `/tmp` — маленький
+tmpfs, запускайте с `TMPDIR=~/tmp-trivy cast scan /` (папку создайте заранее).
+
+**Как cast понимает цель.** По порядку: зарезервированное слово (`host`, `cluster`) →
+адрес репозитория (`https://`, `http://`, `git@`) → путь, начинающийся с `.`, `./`, `../`,
+`/` или `~` → существующий файл → hex-ID запущенного контейнера → иначе имя образа.
+Папка с `etc/os-release` — корневая ФС, с `Chart.yaml` — Helm-чарт, остальные — обычная
+папка. Файл определяется по имени и содержимому: `Dockerfile` (`Dockerfile.*`,
+`*.Dockerfile`, `Containerfile`); `.tf`/`.tf.json`, `Chart.yaml`, `docker-compose.yml`,
+YAML/JSON с `apiVersion`+`kind` (Kubernetes) или `AWSTemplateFormatVersion`/`Type: AWS::`
+(CloudFormation) — конфигурация; JSON с `bomFormat: CycloneDX` или `spdxVersion`
+(и SPDX tag-value) — SBOM; `.tar`/`.tar.gz`/`.tgz` с `manifest.json` или `index.json` —
+архив образа; `.vmdk`/`.qcow2`/`.vhd`/`.vhdx`/`.img`/`.raw` — образ диска ВМ. Если файл не
+распознан, cast говорит, что он подумал, и как указать вид явно.
 Явные формы, если автоопределение не подходит: `cast scan image X`, `container X`
-(по имени или ID), `dockerfile ПУТЬ`, `fs ПУТЬ`. Слова `host`, `image`, `container`,
-`dockerfile`, `fs` зарезервированы.
+(по имени или ID), `dockerfile ПУТЬ`, `fs ПУТЬ`, `config ПУТЬ`, `rootfs ПУТЬ`,
+`archive ФАЙЛ`, `sbom ФАЙЛ`, `vm ФАЙЛ`, `repo АДРЕС`. Слова `host`, `cluster`, `image`,
+`container`, `dockerfile`, `fs`, `config`, `rootfs`, `archive`, `sbom`, `vm`, `repo`
+зарезервированы.
 
 **Выбор движка** — флаг `-e/--engine` (через запятую):
 
@@ -110,7 +146,8 @@ cast scan myapp:1.0 --requirements ./requirements.txt   # приоритизац
 ```
 src/cast/
 ├── cli.py              тонкий слой argparse поверх pipeline.run_scan(); команды scan и engines
-├── targets.py          определение цели: образ / контейнер / Dockerfile / папка / host
+├── targets.py          определение цели: образ / контейнер / Dockerfile / папка / host,
+│                       конфигурация / архив образа / rootfs / репозиторий / SBOM / ВМ / кластер
 ├── state.py            метка «проверка хоста уже показывалась»
 ├── pipeline.py          оркестрация: опрашивает сканеры, запускает dedup/scoring
 ├── models.py            единая схема находки (Finding) + Severity

@@ -53,15 +53,35 @@ CAST — Container Automated Security Testing
   3f2a9c1b7d4e            запущенный контейнер: ID из docker ps
   Dockerfile              Dockerfile (Dockerfile, Dockerfile.*, *.Dockerfile,
                           Containerfile)
+  deploy.yaml, main.tf    конфигурация: Kubernetes, Terraform (.tf, .tf.json),
+                          Helm (Chart.yaml), CloudFormation, docker-compose
+  alpine.tar              архив образа (docker save): .tar, .tar.gz, .tgz
+                          с manifest.json или index.json внутри
+  sbom.cdx.json           SBOM: CycloneDX или SPDX (узнаётся по содержимому)
+  disk.qcow2              образ диска ВМ: .vmdk, .qcow2, .vhd, .vhdx, .img, .raw
   ., ./app, ../x, /srv    папка: путь, начинающийся с «.», «/» или «~»
+  /, ./rootfs             корневая ФС: папка, в которой есть etc/os-release
+  ./chart                 Helm-чарт: папка, в которой есть Chart.yaml
+  https://..., git@...    git-репозиторий (Trivy скачает его сам)
   host                    Docker-хост, то есть эта машина
+  cluster                 кластер Kubernetes из текущего контекста kubeconfig
+
+  Порядок определения: зарезервированное слово, адрес репозитория, путь,
+  существующий файл, ID запущенного контейнера, иначе имя образа.
 
   Явная запись, если автоопределение не подходит:
     cast scan image nginx           образ, даже если рядом есть папка nginx
     cast scan container ИМЯ|ID      контейнер по имени
     cast scan dockerfile ПУТЬ       Dockerfile с нестандартным именем
-    cast scan fs ПУТЬ               папка
-  Слова host, image, container, dockerfile, fs зарезервированы.
+    cast scan fs ПУТЬ               папка (даже если в ней есть etc/os-release)
+    cast scan config ПУТЬ           файл или папка конфигурации
+    cast scan rootfs ПУТЬ           корневая ФС
+    cast scan archive ФАЙЛ          архив образа
+    cast scan sbom ФАЙЛ             SBOM
+    cast scan vm ФАЙЛ               образ диска ВМ
+    cast scan repo АДРЕС            git-репозиторий
+  Слова host, cluster, image, container, dockerfile, fs, config, rootfs,
+  archive, sbom, vm, repo зарезервированы.
 
 ПАРАМЕТРЫ cast scan
   -e, --engine ДВИЖОК     запустить только эти движки (через запятую):
@@ -84,6 +104,17 @@ CAST — Container Automated Security Testing
   папка        trivy         уязвимые зависимости, секреты, ошибки конфигурации
                              (в том числе Dockerfile внутри)
   Dockerfile   trivy         ошибки конфигурации
+  конфигурация trivy         ошибки конфигурации (trivy config). Для
+                             docker-compose в Trivy проверок нет: отчёт пустой
+  архив образа trivy         уязвимости в пакетах, секреты (trivy image --input)
+  корневая ФС  trivy         уязвимости в пакетах, секреты (trivy rootfs)
+  репозиторий  trivy         уязвимые зависимости, секреты (trivy repository)
+  SBOM         trivy         уязвимости в перечисленных пакетах (trivy sbom)
+  образ ВМ     trivy         уязвимости в пакетах, секреты (trivy vm; в Trivy
+                             экспериментально)
+  кластер      trivy         уязвимости образов, ошибки конфигурации, секреты,
+                             RBAC (trivy kubernetes; в Trivy экспериментально;
+                             нужен доступ к кластеру, как у kubectl)
   контейнер    docker-bench  как запущен контейнер (CIS Docker Benchmark);
                              содержимое образа проверяет «-e trivy»
   host         docker-bench  настройки Docker-хоста (CIS Docker Benchmark):
@@ -104,6 +135,13 @@ CAST — Container Automated Security Testing
   cast scan 3f2a9c1b7d4e                как запущен контейнер
   cast scan 3f2a9c1b7d4e -e trivy       пакеты образа этого контейнера
   cast scan ./myapp --requirements requirements.txt
+  cast scan deploy.yaml                 ошибки конфигурации Kubernetes
+  cast scan main.tf                     ошибки конфигурации Terraform
+  cast scan alpine.tar                  архив образа из docker save
+  cast scan sbom.cdx.json               уязвимости по SBOM
+  cast scan /                           корневая ФС этой машины (долго, до 30 мин)
+  cast scan https://github.com/aquasecurity/trivy-ci-test
+  cast scan cluster                     кластер Kubernetes
   cast scan host -f html                проверка хоста с HTML-отчётом
   cast scan alpine -o alpine.json       JSON под своим именем
 
@@ -123,6 +161,9 @@ CAST — Container Automated Security Testing
   /opt/docker-bench-security   Docker Bench (CAST_DOCKER_BENCH_DIR — другая
                                папка)
   CAST_STATE_DIR               где хранить отметку о первом запуске
+  TMPDIR                       временная папка Trivy. На корне / он скачивает
+                               туда Java DB (больше 700 МБ): если /tmp мал,
+                               укажите папку на диске
 """
 
 
@@ -173,7 +214,9 @@ def _load_context(requirements_path: Path | None, console: Console) -> ScanConte
 
 _TARGET_WORDS = {
     "image": "образ", "container": "контейнер", "dockerfile": "Dockerfile",
-    "fs": "папку", "host": "Docker-хост",
+    "fs": "папку", "host": "Docker-хост", "archive": "архив образа",
+    "config": "конфигурацию", "rootfs": "корневую ФС", "repo": "репозиторий",
+    "sbom": "SBOM", "vm": "образ диска ВМ", "cluster": "кластер Kubernetes",
 }
 
 
