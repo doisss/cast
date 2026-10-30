@@ -63,13 +63,6 @@ def _severity_line(findings, section: Section) -> Text:
                 f"{_SEVERITY_ICON[sev]} {sev.upper()}: {counts[sev]}   ",
                 style=_SEVERITY_STYLE[sev],
             )
-    if section.raw_count > len(findings):
-        line.append(
-            f"\n{section.tool} вернул записей: {section.raw_count}. Одна и та же уязвимость "
-            "в одном пакете, найденная в нескольких файлах, показана одной строкой, "
-            "все места — в колонке «Где» (и в -f json / -f html).",
-            style="dim",
-        )
     return line
 
 
@@ -196,7 +189,7 @@ def _print_section(console: Console, result: ScanResult, section: Section, top: 
         if section.findings:
             _print_severity_table(console, section.findings, top,
                                   show_where=result.kind in _SHOW_WHERE
-                                  or section.raw_count > len(section.findings))
+                                  or len({f.location for f in section.findings}) > 1)
             if any(f.severity.value == "unknown" for f in section.findings):
                 console.print("[dim]❓ UNKNOWN — Trivy не указал уровень критичности "
                               "(так бывает у свежих записей и у баз вроде Debian Security Tracker).[/dim]")

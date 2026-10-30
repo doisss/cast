@@ -54,10 +54,22 @@ def test_case_insensitive_dedup_key():
     assert len(result) == 1
 
 
-def test_same_cve_in_several_files_keeps_every_location():
+def test_same_scanner_findings_are_never_merged():
+    # одна CVE в одном пакете в трёх файлах (и даже дважды в одном) — столько строк,
+    # сколько записей вернул сканер
     def vuln(where):
         return Finding("trivy", "CVE-1", "t", Severity.HIGH, package="stdlib", location=where)
 
-    merged = deduplicate([vuln("usr/bin/a"), vuln("usr/bin/b"), vuln("usr/bin/a")])
-    assert len(merged) == 1
-    assert merged[0].location == "usr/bin/a; usr/bin/b"
+    result = deduplicate([vuln("usr/bin/a"), vuln("usr/bin/b"), vuln("usr/bin/a")])
+    assert [f.location for f in result] == ["usr/bin/a", "usr/bin/b", "usr/bin/a"]
+    assert all(f.confirmed_by == ["trivy"] for f in result)
+
+
+def test_other_scanner_confirms_one_row_and_order_is_kept():
+    findings = [_finding("trivy"), _finding("trivy"), _finding("docker-bench"),
+                _finding("trivy", package="zlib")]
+    result = deduplicate(findings)
+    assert len(result) == 3
+    assert result[0].confirmed_by == ["trivy", "docker-bench"]
+    assert result[1].confirmed_by == ["trivy"]
+    assert result[2].package == "zlib"

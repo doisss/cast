@@ -3,6 +3,8 @@
 (например, и Trivy и ещё какой-то добавленный позже инструмент нашли
 одну CVE в одном пакете), в итоговом отчёте должна остаться одна запись,
 а не две. Ключ объединения — Finding.dedup_key() (см. models.py).
+Записи ОДНОГО сканера не склеиваются никогда: отчёт показывает ровно столько
+строк, сколько вернул сам сканер (одна CVE в семи файлах — семь строк).
 """
 
 from __future__ import annotations
@@ -11,36 +13,32 @@ from cast.models import Finding
 
 
 def deduplicate(findings: list[Finding]) -> list[Finding]:
-    merged: dict[tuple[str, str | None], Finding] = {}
+    """Склеиваются только находки РАЗНЫХ сканеров. Записи одного сканера остаются
+    как есть: одна CVE одной библиотеки Go в семи программах — семь строк, по строке
+    на файл, ровно столько, сколько вернул сам сканер."""
+    merged: dict[tuple[str, str | None], list[Finding]] = {}
+    result: list[Finding] = []
 
     for finding in findings:
         key = finding.dedup_key()
-        existing = merged.get(key)
+        candidates = merged.setdefault(key, [])
+        # запись другого сканера, к которой этот сканер ещё не присоединялся
+        existing = next((f for f in candidates if finding.source_tool not in f.confirmed_by), None)
 
         if existing is None:
             finding.confirmed_by = [finding.source_tool]
-            merged[key] = finding
+            candidates.append(finding)
+            result.append(finding)
             continue
 
-        # уже видели такую находку — объединяем список инструментов-подтверждений
-        if finding.source_tool not in existing.confirmed_by:
-            existing.confirmed_by.append(finding.source_tool)
-
-        # одна CVE в одном пакете, но в разных файлах (одна библиотека Go в семи
-        # программах) — строка одна, но в «Где» остаются все места, ни одно не теряется
-        locations = _locations(existing) + [loc for loc in _locations(finding)
-                                            if loc not in _locations(existing)]
+        # уже видели такую находку у другого сканера — объединяем список подтверждений
+        existing.confirmed_by.append(finding.source_tool)
 
         # если новая запись содержит более высокую критичность — берём её данные
         # (разные сканеры иногда расходятся в оценке severity одной и той же CVE)
         if finding.severity.rank > existing.severity.rank:
-            confirmed_by = existing.confirmed_by
-            merged[key] = finding
-            merged[key].confirmed_by = confirmed_by
-        merged[key].location = "; ".join(locations) or None
+            finding.confirmed_by = existing.confirmed_by
+            candidates[candidates.index(existing)] = finding
+            result[result.index(existing)] = finding
 
-    return list(merged.values())
-
-
-def _locations(finding: Finding) -> list[str]:
-    return [loc for loc in (finding.location or "").split("; ") if loc]
+    return result

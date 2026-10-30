@@ -103,8 +103,8 @@ class Finding:
     priority_reasons: list[str] = field(default_factory=list)
 
     def dedup_key(self) -> tuple[str, str | None]:
-        """По этому ключу находки считаются одинаковыми: один и тот же check_id
-        в одном и том же пакете, независимо от того, какой инструмент его нашёл."""
+        """По этому ключу находки РАЗНЫХ сканеров считаются одинаковыми: один и тот же
+        check_id в одном и том же пакете (записи одного сканера не склеиваются)."""
         pkg = (self.package or "").lower()
         if not pkg and self.status is None and self.location:
             # находки без пакета (ошибки конфигурации, секреты) различаем по месту,

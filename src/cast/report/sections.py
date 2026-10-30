@@ -30,7 +30,6 @@ class Section:
     seconds: float = 0.0
     summary: dict = field(default_factory=dict)  # итог движка: checks, score
     extra: str = ""          # пометка в скобках после движка, напр. стандарт проверки
-    raw_count: int = 0       # сколько записей вернул сам движок (до объединения одинаковых)
 
 
 def _natural(check_id: str) -> tuple:
@@ -99,7 +98,7 @@ def build_sections(result: ScanResult) -> list[Section]:
         else:
             sections.append(Section(run.name, section_title(result, run.name, run.scope),
                                     "severity", findings, seconds=run.seconds,
-                                    note=empty_note(result), raw_count=run.findings))
+                                    note=empty_note(result)))
     return sections
 
 

@@ -342,7 +342,7 @@ def test_slow_targets_wait_longer_than_trivys_own_timeout():
     assert _wait_limit(["trivy", "image", "alpine"]) == 600
 
 
-def test_merged_rows_report_trivys_own_count_and_all_places():
+def test_same_cve_in_two_files_is_two_rows_with_where_column():
     from cast.models import Finding, Severity
     from tests.test_engines_and_cli import FakeTrivy
 
@@ -355,7 +355,9 @@ def test_merged_rows_report_trivys_own_count_and_all_places():
                     for w in ("usr/bin/a", "usr/bin/b")]
 
     result = run_scan(Target("image", "x:1"), scanners=[TwoFiles()])
+    assert len(result.findings) == 2
     buf = StringIO()
     console_report.render(result, console=Console(file=buf, width=250, force_terminal=False))
     out = " ".join(buf.getvalue().split())
-    assert "trivy вернул записей: 2" in out and "usr/bin/a; usr/bin/b" in out
+    assert ": 2" in out and "usr/bin/a" in out and "usr/bin/b" in out and "Где" in out
+    assert "вернул записей" not in out
