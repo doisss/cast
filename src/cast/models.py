@@ -85,6 +85,9 @@ class Finding:
 
     # Где найдено (файл или файл:строка) — у находок в папках, Dockerfile, секретов.
     location: str | None = None
+    # Строки файла, на которые указал движок (у Trivy — CauseMetadata.Code.Lines):
+    # [{"number": 14, "content": "- name: web", "is_cause": True}, ...]. Пусто, если не прислал.
+    code_lines: list[dict] = field(default_factory=list)
     # Что сделать, чтобы исправить (у Trivy — Resolution, у Docker Bench — remediation).
     remediation: str | None = None
     remediation_impact: str | None = None   # чем грозит исправление (Docker Bench)
@@ -127,6 +130,7 @@ class Finding:
             "status": self.status,
             "details": self.details,
             "location": self.location,
+            "code_lines": self.code_lines,
             "remediation": self.remediation,
             "remediation_impact": self.remediation_impact,
             "url": self.url,

@@ -15,6 +15,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cast.pipeline import ScanResult
+from cast.report.fix_hint import yaml_hint
 from cast.report.sections import STATUS_HELP, Section, build_sections, container_image_note
 
 _SEVERITY_STYLE = {
@@ -132,6 +133,83 @@ def _print_severity_table(console: Console, findings, top: int, show_where: bool
         )
 
 
+def _group_by_place(findings) -> list[tuple[str, list]]:
+    """Находки конфигов, собранные по месту в файле (файл:строки). Trivy печатает код
+    у каждой находки отдельно, а на одно место их часто приходится десяток."""
+    groups: dict[str, list] = {}
+    for f in findings:
+        groups.setdefault(f.location or "—", []).append(f)
+    order = list(groups)
+    return sorted(groups.items(), key=lambda kv: (
+        -max(f.severity.rank for f in kv[1]), -len(kv[1]), order.index(kv[0])))
+
+
+def _code_text(lines: list[dict]) -> Text:
+    """Строки кода как у Trivy: номер и скобка ┌ │ └ у строк-причин."""
+    causes = [i for i, line in enumerate(lines) if line["is_cause"]]
+    width = len(str(max(line["number"] for line in lines)))
+    text = Text(no_wrap=True, overflow="crop")
+    for i, line in enumerate(lines):
+        if i:
+            text.append("\n")
+        if not line["is_cause"]:
+            mark = " "
+        elif len(causes) == 1:
+            mark = "▶"
+        else:
+            mark = "┌" if i == causes[0] else ("└" if i == causes[-1] else "│")
+        text.append(f"  {line['number']:>{width}} ", style="dim")
+        text.append(f"{mark} ", style="yellow")
+        text.append(line["content"].rstrip(), style=None if line["is_cause"] else "dim")
+    return text
+
+
+def _print_config_groups(console: Console, findings, top: int) -> None:
+    """Ошибки конфигурации: место в файле, его код один раз и таблица правил под ним."""
+    shown = findings if top <= 0 else findings[:top]
+    for place, group in _group_by_place(shown):
+        head = Text()
+        head.append(f"▌ {place}", style="bold cyan")
+        head.append(f"  {len(group)} шт.:", style="bold")
+        for sev in ("critical", "high", "medium", "low", "unknown"):
+            n = sum(1 for f in group if f.severity.value == sev)
+            if n:
+                head.append(f"  {_SEVERITY_ICON[sev]} {sev.upper()}: {n}", style=_SEVERITY_STYLE[sev])
+        console.print(head)
+        code = next((f.code_lines for f in group if f.code_lines), [])
+        if code:
+            console.print(_code_text(code))
+        else:
+            console.print("  [dim](Trivy не прислал строки кода для этого места)[/dim]")
+
+        table = Table(show_lines=True, expand=True)
+        table.add_column("", width=2)
+        table.add_column("ID", no_wrap=True)
+        table.add_column("Что не так", ratio=1, overflow="fold")
+        table.add_column("Как исправить", ratio=1, overflow="fold")
+        for f in sorted(group, key=lambda f: (-f.severity.rank, f.check_id)):
+            what = Text(f.title)
+            if f.url:
+                what.append(f"\n{f.url}", style="dim")
+            fix = Text(f.remediation or "—")
+            hint = yaml_hint(f.check_id, f.remediation)
+            if hint:
+                fix.append("\nв файле:", style="green")
+                for line in hint:
+                    fix.append(f"\n  {line}", style="green")
+            table.add_row(_SEVERITY_ICON[f.severity.value],
+                          Text(f.check_id, style=_SEVERITY_STYLE[f.severity.value]), what, fix)
+        console.print(table)
+        console.print()
+
+    hidden = len(findings) - len(shown)
+    if hidden > 0:
+        console.print(
+            f"[dim]… и ещё {hidden} с меньшим приоритетом. "
+            "Полный список: -f json или -f html, либо --top 0[/dim]"
+        )
+
+
 def _print_status_table(console: Console, findings, top: int) -> None:
     problems = list(findings)   # показываем всё, что отдал Docker Bench, включая PASS
     if not problems:
@@ -186,7 +264,9 @@ def _print_section(console: Console, result: ScanResult, section: Section, top: 
         _print_status_table(console, section.findings, top)
     else:
         console.print(_severity_line(section.findings, section))
-        if section.findings:
+        if section.findings and result.kind == "config":
+            _print_config_groups(console, section.findings, top)
+        elif section.findings:
             _print_severity_table(console, section.findings, top,
                                   show_where=result.kind in _SHOW_WHERE
                                   or len({f.location for f in section.findings}) > 1)

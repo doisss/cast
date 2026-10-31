@@ -488,8 +488,13 @@ class TrivyScanner(Scanner):
                 if (mis.get("Status") or "FAIL").upper() == "PASS":
                     continue
                 cause = mis.get("CauseMetadata") or {}
-                line = cause.get("StartLine")
+                line, end = cause.get("StartLine"), cause.get("EndLine")
+                if line and end and end != line:
+                    line = f"{line}-{end}"       # место целиком, как пишет сам Trivy: deploy.yaml:14-17
                 where = f"{target_name}:{line}" if target_name and line else target_name
+                code = [{"number": c.get("Number"), "content": c.get("Content") or "",
+                         "is_cause": bool(c.get("IsCause"))}
+                        for c in ((cause.get("Code") or {}).get("Lines") or []) if c.get("Number")]
                 findings.append(
                     Finding(
                         source_tool=self.name,
@@ -500,6 +505,7 @@ class TrivyScanner(Scanner):
                         package=None,
                         pkg_type="config",
                         location=where,
+                        code_lines=code,
                         remediation=mis.get("Resolution") or None,
                         url=mis.get("PrimaryURL"),
                     )
