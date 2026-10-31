@@ -130,3 +130,13 @@ def test_other_targets_keep_the_table():
     console_report.render(result, console=Console(file=buf, width=200, force_terminal=False))
     out = buf.getvalue()
     assert "Приоритет" in out and "▌" not in out
+
+
+def test_top_hides_rows_but_not_the_real_count_of_a_place():
+    result = run_scan(Target("config", "deploy.yaml", subtype="Kubernetes"), scanners=[_Fake()])
+    buf = StringIO()
+    console_report.render(result, console=Console(file=buf, width=200, force_terminal=False), top=2)
+    out = buf.getvalue()
+    assert "▌ deploy.yaml:14-17  3 шт." in out and "(в таблице 2, остальные скрыты --top)" in out
+    assert "deploy.yaml:3-4" not in out          # у этого места все строки скрыты
+    assert "и ещё 2" in out

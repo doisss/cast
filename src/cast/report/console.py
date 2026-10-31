@@ -167,7 +167,12 @@ def _code_text(lines: list[dict]) -> Text:
 def _print_config_groups(console: Console, findings, top: int) -> None:
     """Ошибки конфигурации: место в файле, его код один раз и таблица правил под ним."""
     shown = findings if top <= 0 else findings[:top]
-    for place, group in _group_by_place(shown):
+    visible = {id(f) for f in shown}
+    # места и их счётчики — по всем находкам, --top ограничивает только строки таблиц
+    for place, group in _group_by_place(findings):
+        rows = [f for f in group if id(f) in visible]
+        if not rows:
+            continue
         head = Text()
         head.append(f"▌ {place}", style="bold cyan")
         head.append(f"  {len(group)} шт.:", style="bold")
@@ -175,6 +180,8 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
             n = sum(1 for f in group if f.severity.value == sev)
             if n:
                 head.append(f"  {_SEVERITY_ICON[sev]} {sev.upper()}: {n}", style=_SEVERITY_STYLE[sev])
+        if len(rows) < len(group):
+            head.append(f"  (в таблице {len(rows)}, остальные скрыты --top)", style="dim")
         console.print(head)
         code = next((f.code_lines for f in group if f.code_lines), [])
         if code:
@@ -187,7 +194,7 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         table.add_column("ID", no_wrap=True)
         table.add_column("Что не так", ratio=1, overflow="fold")
         table.add_column("Как исправить", ratio=1, overflow="fold")
-        for f in sorted(group, key=lambda f: (-f.severity.rank, f.check_id)):
+        for f in sorted(rows, key=lambda f: (-f.severity.rank, f.check_id)):
             what = Text(f.title)
             if f.url:
                 what.append(f"\n{f.url}", style="dim")
