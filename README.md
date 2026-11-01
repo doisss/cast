@@ -1,231 +1,197 @@
 # cast
 
-CLI-утилита — оболочка-оркестратор над существующими сканерами безопасности
-контейнеров. Сама не ищет уязвимости с нуля, а вызывает Trivy и Docker Bench
-for Security, нормализует их разнородный вывод к единой схеме, убирает
-дубликаты и пересчитывает приоритет находок с учётом контекста конкретного
-приложения.
+cast — программа для командной строки, которая проверяет безопасность Docker:
+образы, контейнеры, Dockerfile, папки с кодом, конфигурации Kubernetes и сам
+компьютер, на котором стоит Docker.
 
-Вызывается двумя равнозначными именами — `cast` и `sarbar` (указаны в
-`pyproject.toml` как два `console_scripts`, ведущих к одной и той же функции).
+Сама cast уязвимости не ищет. Она запускает две известные бесплатные программы:
+
+- **Trivy** — ищет уязвимые версии пакетов, ошибки в настройках и забытые пароли;
+- **Docker Bench for Security** — проверяет Docker по рекомендациям CIS.
+
+Дальше cast собирает их ответы в одну понятную таблицу на русском языке, убирает
+повторы и подсказывает, что исправлять в первую очередь. cast показывает только то,
+что нашли сами программы, и ничего не добавляет от себя.
+
+Команду можно вызывать двумя именами: `cast` или `sarbar`, это одно и то же.
 
 ## Установка
 
-Одной командой (Linux с apt: Debian, Ubuntu, Kali). Скрипт ставит `cast`, Trivy и
-Docker Bench for Security; Docker сам не ставит (только подсказывает), если его нет:
+Нужен Linux с Python 3.11 или новее, `curl` и `tar`. Скопируйте в терминал:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh)
 ```
 
-Раскладка по правилам Linux:
+Установщик поставит cast и Docker Bench. На Debian, Ubuntu и Kali он сам поставит
+и Trivy, на других дистрибутивах Trivy нужно поставить отдельно
+([инструкция Trivy](https://trivy.dev/latest/getting-started/installation/)).
+Docker он не ставит: если Docker нет, установщик подскажет, как его поставить.
+Запускать установщик повторно можно, ничего не сломается.
+
+Куда всё ставится (это обычные места для Linux):
 
 | Что | Куда |
 |---|---|
-| cast (изолированный venv) | `/opt/cast/venv` |
-| команды `cast` и `sarbar` | `/usr/local/bin` (симлинки) |
-| Docker Bench for Security v1.6.1 | `/opt/docker-bench-security` |
-| Trivy | пакет apt (репозиторий aquasecurity) |
+| cast | `/opt/cast` |
+| команды `cast` и `sarbar` | `/usr/local/bin` |
+| Docker Bench | `/opt/docker-bench-security` |
+| Trivy | `/usr/bin` (ставится через apt) |
 
-Опции: `--local` (из локальной копии), `--skip-trivy`, `--skip-docker-bench`,
-`--with-docker`, `--force`, `--dry-run`, `--ref`, `--version`, `--list-versions`.
-Повторный запуск безопасен. Чужие команды `cast`/`sarbar` в `/usr/local/bin` не
-затираются без `--force`.
+Проверить, что всё на месте:
+
+```bash
+cast -v          # версия cast
+cast engines     # какие программы-движки найдены и где они лежат
+```
+
+Удалить: `sudo bash uninstall.sh`. Чтобы удалить и Trivy, добавьте `--with-trivy`.
 
 ### Версии
 
-Каждая стабильная версия — тег `vX.Y.Z` и релиз на странице
-[Releases](https://github.com/doisss/cast/releases); что изменилось — в
-[CHANGELOG.md](CHANGELOG.md). Поставить конкретную версию (поверх установленной
-тоже можно, это замена, а не вторая копия):
+Список версий и что в них изменилось — на странице
+[Releases](https://github.com/doisss/cast/releases) и в файле [CHANGELOG.md](CHANGELOG.md).
+
+Посмотреть все версии и поставить нужную:
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh) --list-versions
 bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh) --version v0.1.0
 ```
 
-Какая версия стоит сейчас: `cast -v`.
+Новая версия ставится вместо старой, а не рядом с ней.
 
-### Показ всех возможностей
+## Как пользоваться
 
-`bash demo/demo.sh` сам готовит цели (контейнер, архив образа, корневую ФС, образ
-диска), запускает по очереди все виды проверок и печатает каждую команду, её
-вывод, код выхода и время, в конце — сводную таблицу. `basic` — только обычные
-команды, `medium` — только новые виды целей, `--pause` — пауза перед каждой
-командой. Подробности: `bash demo/demo.sh --help`.
-
-Удаление: `sudo bash uninstall.sh` (добавьте `--with-trivy`, чтобы убрать и Trivy).
-
-Для разработки: `python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"`.
-
-Если какой-то сканер не найден — `cast` не падает, а пропускает его с предупреждением.
-
-### Как утилита находит Docker Bench
-
-Скрипт запускается только из своей папки, поэтому `cast` ищет его так:
-`CAST_DOCKER_BENCH_DIR` → `PATH` → `/opt/docker-bench-security` →
-`/usr/local/share/docker-bench-security` → `~/docker-bench-security` (в том числе
-домашняя папка `SUDO_USER`). Запускается с флагом `-b`. Нужен доступ к Docker-демону:
-запускайте `sudo cast scan ...` или добавьте пользователя в группу `docker`.
-
-## Использование
-
-Команд две: `scan` (проверить цель) и `engines` (показать движки). Движок под цель
-cast выбирает сам.
+Главная команда одна: `cast scan` и то, что нужно проверить. Что именно ему дали,
+cast поймёт сам и сам выберет программу для проверки.
 
 ```bash
-cast scan alpine:3.19            # образ → Trivy
-cast scan 12b1e6c27fd6           # ID запущенного контейнера → Docker Bench (настройки запуска)
-cast scan Dockerfile             # Dockerfile → Trivy (ошибки конфигурации)
-cast scan ./myapp                # папка → Trivy (зависимости, секреты, конфигурации)
-cast scan host                   # Docker-хост → Docker Bench (CIS)
-cast engines                     # список движков, версии, что умеют
+cast scan alpine:3.19        # образ Docker
+cast scan 12b1e6c27fd6       # запущенный контейнер (по ID)
+cast scan Dockerfile         # Dockerfile
+cast scan ./myapp            # папка с проектом
+cast scan host               # текущая машина с Docker
 ```
 
-Остальные команды Trivy доступны через тот же `cast scan`, без новых подкоманд:
+Что ещё можно проверить:
 
 ```bash
-cast scan deploy.yaml            # Kubernetes YAML → trivy config
-cast scan main.tf                # Terraform (.tf, .tf.json) → trivy config
-cast scan ./chart                # Helm-чарт (папка с Chart.yaml или сам Chart.yaml) → trivy config
-cast scan stack.yaml             # CloudFormation → trivy config
-cast scan docker-compose.yml     # → trivy config (проверок для compose в Trivy нет: отчёт пустой, cast так и пишет)
-cast scan alpine.tar             # архив образа (docker save; .tar/.tar.gz/.tgz) → trivy image --input
-cast scan sbom.cdx.json          # SBOM CycloneDX или SPDX (по содержимому) → trivy sbom
-cast scan /                      # корневая ФС (папка с etc/os-release) → trivy rootfs
-cast scan https://github.com/aquasecurity/trivy-ci-test   # git-репозиторий → trivy repository
-cast scan disk.qcow2             # образ диска ВМ (.vmdk/.qcow2/.vhd/.vhdx/.img/.raw) → trivy vm (экспериментально в Trivy)
-cast scan cluster                # кластер Kubernetes из текущего kubeconfig → trivy kubernetes (экспериментально в Trivy)
+cast scan deploy.yaml        # файл Kubernetes
+cast scan main.tf            # файл Terraform
+cast scan ./chart            # Helm-чарт
+cast scan stack.yaml         # шаблон CloudFormation
+cast scan docker-compose.yml # docker-compose
+cast scan alpine.tar         # образ, сохранённый в файл (docker save)
+cast scan sbom.cdx.json      # список компонентов SBOM (CycloneDX, SPDX)
+cast scan /                  # вся файловая система текущей машины
+cast scan https://github.com/aquasecurity/trivy-ci-test   # git-репозиторий
+cast scan disk.qcow2         # образ диска виртуальной машины
+cast scan cluster            # кластер Kubernetes
 ```
 
-Каждая цель проверяется тем набором проверок, который Trivy включает для своей команды по
-умолчанию (для `trivy fs` cast, как и раньше, добавляет `misconfig`). OCI-архив без
-`manifest.json` (например, `podman save --format oci-archive`) cast распаковывает во временную
-папку: `trivy image --input` принимает такой формат только папкой.
-
-Корневая ФС, образ ВМ, репозиторий и кластер проверяются долго, поэтому для них cast
-передаёт Trivy `--timeout 30m` (по умолчанию у Trivy 5 минут). На корне `/` Trivy, найдя
-`.jar`, ещё и скачивает Java DB (больше 700 МБ) во временную папку; если `/tmp` — маленький
-tmpfs, запускайте с `TMPDIR=~/tmp-trivy cast scan /` (папку создайте заранее).
-
-**Как cast понимает цель.** По порядку: зарезервированное слово (`host`, `cluster`) →
-адрес репозитория (`https://`, `http://`, `git@`) → путь, начинающийся с `.`, `./`, `../`,
-`/` или `~` → существующий файл → hex-ID запущенного контейнера → иначе имя образа.
-Папка с `etc/os-release` — корневая ФС, с `Chart.yaml` — Helm-чарт, остальные — обычная
-папка. Файл определяется по имени и содержимому: `Dockerfile` (`Dockerfile.*`,
-`*.Dockerfile`, `Containerfile`); `.tf`/`.tf.json`, `Chart.yaml`, `docker-compose.yml`,
-YAML/JSON с `apiVersion`+`kind` (Kubernetes) или `AWSTemplateFormatVersion`/`Type: AWS::`
-(CloudFormation) — конфигурация; JSON с `bomFormat: CycloneDX` или `spdxVersion`
-(и SPDX tag-value) — SBOM; `.tar`/`.tar.gz`/`.tgz` с `manifest.json` или `index.json` —
-архив образа; `.vmdk`/`.qcow2`/`.vhd`/`.vhdx`/`.img`/`.raw` — образ диска ВМ. Если файл не
-распознан, cast говорит, что он подумал, и как указать вид явно.
-Явные формы, если автоопределение не подходит: `cast scan image X`, `container X`
-(по имени или ID), `dockerfile ПУТЬ`, `fs ПУТЬ`, `config ПУТЬ`, `rootfs ПУТЬ`,
-`archive ФАЙЛ`, `sbom ФАЙЛ`, `vm ФАЙЛ`, `repo АДРЕС`. Слова `host`, `cluster`, `image`,
-`container`, `dockerfile`, `fs`, `config`, `rootfs`, `archive`, `sbom`, `vm`, `repo`
-зарезервированы.
-
-**Выбор движка** — флаг `-e/--engine` (через запятую):
+Если cast понял цель неправильно, скажите ему прямо, что это:
 
 ```bash
-cast scan 12b1e6c27fd6 -e trivy                 # вместо Docker Bench — Trivy по образу контейнера
-cast scan 12b1e6c27fd6 -e docker-bench,trivy    # оба; главный (Docker Bench) выводится первым
+cast scan image alpine:3.19
+cast scan container my-container
+cast scan config ./k8s
 ```
 
-Если движок не умеет такую цель, cast так и скажет. Для контейнера по умолчанию
-запускается только Docker Bench, а в конце отчёта стоит пометка, что уязвимости внутри
-образа не проверялись.
+Такие же подсказки есть для `dockerfile`, `fs`, `rootfs`, `archive`, `sbom`, `vm`, `repo`.
 
-**Отчёты.** Таблица в консоли выводится всегда. Файлы добавляются флагами:
+### Полезные флаги
 
 ```bash
-cast scan alpine:3.19 -f html            # файл создастся в текущей папке, имя сгенерируется само
-cast scan alpine:3.19 -f json,html       # сразу два файла
-cast scan alpine:3.19 -o my.html         # своё имя; формат определяется по расширению
-cast scan alpine:3.19 --top 0            # показать в консоли все строки (по умолчанию 25)
-cast scan myapp:1.0 --requirements ./requirements.txt   # приоритизация по зависимостям
+cast scan alpine:3.19 -f html           # сохранить отчёт в HTML
+cast scan alpine:3.19 -f json,html      # сразу в JSON и HTML
+cast scan alpine:3.19 -o report.html    # сохранить под своим именем
+cast scan alpine:3.19 --top 0           # показать все строки (по умолчанию 25)
+cast scan 12b1e6c27fd6 -e trivy         # проверить контейнер через Trivy, а не Docker Bench
+cast scan myapp:1.0 --requirements ./requirements.txt   # учесть, какие пакеты важны приложению
+cast -h                                 # справка
 ```
 
-**Docker Bench: статусы, а не уровни.** У Docker Bench нет уровней критичности, и cast их не
-выдумывает: показываются статусы PASS / WARN / INFO / NOTE как есть. WARN — нарушение
-рекомендации, NOTE — решение за вами, INFO — информация или ручная проверка, PASS — в
-порядке (в таблице не показан, только в счётчике). У замечаний указано, к чему они
-относятся (например, имя контейнера). Уровни критичности (CRITICAL…LOW) есть только
-у находок Trivy.
+### Как читать результат
 
-**Проверка хоста при первом запуске.** При самом первом `cast scan` дополнительно один раз
-показывается проверка Docker-хоста; дальше — только по `cast scan host`. Метка хранится в
-`/var/lib/cast/host-checked` (или `~/.local/state/cast/`, если нет прав).
+У находок Trivy есть уровень опасности: CRITICAL, HIGH, MEDIUM, LOW.
 
-Коды возврата: `0` — всё отработало, критичных нет; `1` — найдена хотя бы одна
-`critical`; `2` — проверка не выполнена (главный движок упал, цель указана неверно);
-`130` — прервано по Ctrl+C.
+У Docker Bench уровней нет, и cast их не придумывает. Он показывает статусы:
 
-Если главный движок не отработал, cast так и пишет и не выдаёт результаты другого
-движка за результаты проверки.
+- **WARN** — рекомендация нарушена, стоит исправить;
+- **NOTE** — решать вам;
+- **INFO** — просто информация или проверка, которую надо сделать руками;
+- **PASS** — всё в порядке.
 
-## Архитектура
+Чем закончилась команда (это видно по коду выхода):
 
-```
-src/cast/
-├── cli.py              тонкий слой argparse поверх pipeline.run_scan(); команды scan и engines
-├── targets.py          определение цели: образ / контейнер / Dockerfile / папка / host,
-│                       конфигурация / архив образа / rootfs / репозиторий / SBOM / ВМ / кластер
-├── state.py            метка «проверка хоста уже показывалась»
-├── pipeline.py          оркестрация: опрашивает сканеры, запускает dedup/scoring
-├── models.py            единая схема находки (Finding) + Severity
-├── context.py           ScanContext — парсинг requirements.txt для приоритизации
-├── dedup.py              дедупликация находок от разных инструментов (записи одного не склеиваются)
-├── scoring.py            собственный алгоритм приоритизации (ключевая логика)
-├── scanners/
-│   ├── base.py            абстрактный интерфейс Scanner — контракт для плагинов
-│   ├── trivy.py            обёртка над Trivy (статический анализ, JSON)
-│   └── docker_bench.py     обёртка над Docker Bench (текстовый вывод)
-└── report/
-    ├── sections.py         разделы отчёта по движкам (общие для console/json/html)
-    ├── console.py          рендер в терминал (rich)
-    ├── json_report.py      рендер в JSON
-    ├── html_report.py      рендер в HTML (Jinja2)
-    └── templates/report.html.jinja
-```
+| Код | Что значит |
+|---|---|
+| 0 | проверка прошла, критичных находок нет |
+| 1 | есть хотя бы одна критичная находка |
+| 2 | проверку выполнить не удалось |
+| 130 | вы остановили проверку (Ctrl+C) |
 
-**Почему так разложено.** `pipeline.py` ничего не знает о том, как устроен
-Trivy или Docker Bench — он лишь опрашивает список объектов, реализующих
-интерфейс `Scanner` (`scanners/base.py`). Это значит, что добавление нового
-инструмента (например, Grype) не требует правок нигде,
-кроме создания нового файла `scanners/grype.py` и добавления класса в
-`scanners/__init__.py:ALL_SCANNERS`.
+Если какая-то программа не установлена или сломалась, cast не падает. Он прямо
+пишет, что проверка не выполнена, и не выдаёт чужие результаты за свои.
 
-Логика анализа (`pipeline.run_scan()`) полностью отделена от способа вывода
-результата — она возвращает структурированный `ScanResult`, а не печатает
-текст. Это сознательное решение ради будущего расширения: тот же самый
-`run_scan()` можно вызвать из веб-интерфейса (например, Streamlit-дашборда)
-без единой правки в этом слое — поменяется только то, что `cli.py` заменится
-на `app.py`, использующий те же функции.
+### Что важно знать
 
-## Тесты
+- Docker Bench нужен доступ к Docker. Запускайте `sudo cast scan ...` или добавьте
+  себя в группу `docker`.
+- При самом первом `cast scan` cast один раз дополнительно проверит текущую машину.
+  Потом это делается только по команде `cast scan host`.
+- Проверка всей системы, репозитория, диска ВМ или кластера идёт долго, до 30 минут.
+- При проверке `/` Trivy может скачать большую базу Java (больше 700 МБ). Если в
+  `/tmp` мало места, запускайте так: `TMPDIR=~/tmp-trivy cast scan /`. Папку
+  `~/tmp-trivy` создайте заранее.
+
+## Показ всех возможностей
 
 ```bash
+bash demo/demo.sh
+```
+
+Скрипт сам подготовит всё нужное и по очереди запустит все виды проверок. Для каждой
+он покажет команду, результат и время, а в конце выведет общую таблицу.
+Подробности: `bash demo/demo.sh --help`.
+
+## Для разработчиков
+
+Как собрать и запустить тесты:
+
+```bash
+python -m venv .venv && . .venv/bin/activate && pip install -e ".[dev]"
 pytest -v
 ```
 
-Тесты не требуют установленных Trivy/Docker Bench — обращения к subprocess
-подменяются через `unittest.mock`, а парсеры проверяются на реалистичных
-фикстурах вывода (`tests/fixtures_trivy.py`). Пайплайн целиком тестируется
-через `FakeScanner` (`tests/test_pipeline.py`) — так проверяется именно
-*ваша* логика (оркестрация, дедупликация, скоринг), а не правильность
-работы самого Trivy.
+Для тестов Trivy и Docker Bench не нужны: вместо них подставляются заранее
+сохранённые ответы.
 
-## Статус MVP / что дальше
+Как устроен код:
 
-Реализовано:
-- [x] Оркестрация Trivy + Docker Bench с graceful degradation при сбое/отсутствии
-- [x] Нормализация в единую схему `Finding`
-- [x] Дедупликация по `(check_id, package)` — только между разными сканерами; записи одного
-  сканера не склеиваются (одна CVE в семи файлах — семь строк, как у самого сканера)
-- [x] Контекстная приоритизация по `requirements.txt`
-- [x] Вывод: консоль (rich) / JSON / HTML
+```
+src/cast/
+├── cli.py            команды и флаги
+├── targets.py        как cast понимает, что ему дали
+├── pipeline.py       запуск проверок и сбор результатов
+├── models.py         единый вид находки
+├── dedup.py          удаление повторов
+├── scoring.py        расчёт приоритета
+├── context.py        чтение requirements.txt
+├── state.py          отметка «текущая машина уже проверялась»
+├── scanners/         обёртки над Trivy и Docker Bench
+└── report/           вывод в терминал, JSON и HTML
+```
 
-Не реализовано (сознательно вне MVP, см. обсуждение в ВКР):
-- [ ] Офлайн-режим с локальным кэшем базы уязвимостей
-- [ ] Хранение истории сканирований / CI-триггер (переход от «ПО» к «системе»)
+Чтобы подключить новую программу-сканер (например, Grype), достаточно добавить
+файл в `scanners/`. Остальной код менять не нужно. Логика проверки отделена от
+вывода, поэтому позже к ней можно подключить веб-интерфейс.
+
+## Что дальше
+
+Пока не сделано:
+
+- работа без интернета с сохранённой базой уязвимостей;
+- история проверок и запуск из CI;
+- веб-интерфейс.
