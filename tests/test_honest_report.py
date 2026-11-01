@@ -40,7 +40,7 @@ def test_failed_image_engine_is_reported_honestly():
     ])
     assert result.image_scan_failed
     out = _render(result)
-    assert "Сканирование образа НЕ выполнена" in out
+    assert "Сканирование образа НЕ выполнено" in out
     assert "на диске закончилось место" in out
     assert "Уязвимости образа" not in out          # никакой подмены результатов
     

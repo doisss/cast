@@ -88,6 +88,11 @@ class Finding:
     # Строки файла, на которые указал движок (у Trivy — CauseMetadata.Code.Lines):
     # [{"number": 14, "content": "- name: web", "is_cause": True}, ...]. Пусто, если не прислал.
     code_lines: list[dict] = field(default_factory=list)
+    # Раздел отчёта движка (у Docker Bench — номер раздела CIS: "1"…"7").
+    section: str | None = None
+    # Пометки движка у проверки как есть: у Docker Bench "Automated", "Manual",
+    # "Scored", "Deprecated", "Swarm mode not enabled" — из скобок после названия.
+    marks: list[str] = field(default_factory=list)
     # Что сделать, чтобы исправить (у Trivy — Resolution, у Docker Bench — remediation).
     remediation: str | None = None
     remediation_impact: str | None = None   # чем грозит исправление (Docker Bench)
@@ -131,6 +136,8 @@ class Finding:
             "details": self.details,
             "location": self.location,
             "code_lines": self.code_lines,
+            "section": self.section,
+            "marks": self.marks,
             "remediation": self.remediation,
             "remediation_impact": self.remediation_impact,
             "url": self.url,

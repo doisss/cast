@@ -47,6 +47,8 @@ _CHECK_SUFFIX_RE = re.compile(
 
 # Цветовые escape-последовательности (\033[1;31m ...). Запускаем с -b (без цветов),
 # но на всякий случай вычищаем их и из вывода — защита от смены поведения скрипта.
+# Заголовок раздела: "[INFO] 5 - Container Runtime" (номер без точки, без пометки в скобках).
+_SECTION_RE = re.compile(r"^\[INFO\]\s+(\d+)\s*-\s*(.+)$")
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
 _SCRIPT_NAME = "docker-bench-security.sh"
@@ -268,10 +270,15 @@ class DockerBenchScanner(Scanner):
         (PASS/WARN/INFO/NOTE), отчёт сам решает, что показывать."""
         findings: list[Finding] = []
         current: Finding | None = None
+        section: str | None = None
         for line in _ANSI_RE.sub("", raw_output).splitlines():
             line = line.strip()
             if line.startswith("Section B"):
                 break  # дальше идёт список советов, это не проверки
+            head = _SECTION_RE.match(line)
+            if head and not _CHECK_SUFFIX_RE.search(head.group(2)):
+                section, current = head.group(1), None
+                continue
             detail = _DETAIL_RE.match(line)
             if detail:
                 text = detail.group(2).strip()
@@ -288,10 +295,12 @@ class DockerBenchScanner(Scanner):
                 check_id = "—"
             else:
                 status, check_id, description = match.groups()
-            if not _CHECK_SUFFIX_RE.search(description):
+            suffix = _CHECK_SUFFIX_RE.search(description)
+            if not suffix:
                 current = None
                 continue  # заголовок раздела, а не проверка
-            description = _CHECK_SUFFIX_RE.sub("", description).strip()
+            marks = re.findall(r"\(([^()]*)\)", suffix.group(0))
+            description = description[: suffix.start()].strip()
             current = Finding(
                 source_tool=self.name,
                 check_id=check_id,
@@ -299,6 +308,9 @@ class DockerBenchScanner(Scanner):
                 severity=Severity.UNKNOWN,   # у Docker Bench уровней нет, только статус
                 description=description,
                 status=status,
+                # у проверки без номера раздел берём из последнего заголовка
+                section=check_id.split(".")[0] if check_id != "—" else section,
+                marks=marks,
             )
             findings.append(current)
         return findings

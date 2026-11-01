@@ -178,8 +178,44 @@ class _HelpAction(argparse.Action):
         parser.exit()
 
 
+def _russian_error(message: str) -> str:
+    """Сообщения argparse по-русски. Незнакомое сообщение оставляем как есть, чтобы не потерять смысл."""
+    m = re.match(r"argument КОМАНДА: invalid choice: '?([^' ]*)'? \(choose from (.*)\)", message)
+    if m:
+        wrong = m.group(1)
+        text = f"нет команды «{wrong}». Команды: scan, engines"
+        if wrong in RESERVED_WORDS or wrong not in ("scan", "engines"):
+            text += f". Может быть, вы имели в виду: cast scan {wrong}"
+        return text
+    m = re.match(r"argument ([^:]+): invalid int value: '?([^']*)'?", message)
+    if m:
+        return f"{m.group(1)} ждёт целое число, а получено «{m.group(2)}»"
+    m = re.match(r"argument ([^:]+): expected one argument", message)
+    if m:
+        return f"после {m.group(1)} нужно указать значение"
+    m = re.match(r"unrecognized arguments: (.*)", message)
+    if m:
+        return f"неизвестный параметр: {m.group(1)}"
+    m = re.match(r"ambiguous option: (\S+) could match (.*)", message)
+    if m:
+        return f"параметр {m.group(1)} подходит к нескольким: {m.group(2)}"
+    return message
+
+
+class _RuParser(argparse.ArgumentParser):
+    """argparse пишет ошибки по-английски; cast говорит по-русски везде.
+    Сокращения флагов выключены: иначе «--to 3» молча становилось «--top 3»."""
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+    def error(self, message: str):
+        self.exit(2, f"Ошибка: {_russian_error(message)}\nСправка: cast -h\n")
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="cast", usage="cast КОМАНДА ... (справка: cast -h)",
+    parser = _RuParser(prog="cast", usage="cast КОМАНДА ... (справка: cast -h)",
                                      add_help=False)
     subparsers = parser.add_subparsers(dest="command", metavar="КОМАНДА")
     parser.add_argument("-h", "--help", action=_HelpAction)

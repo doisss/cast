@@ -280,3 +280,24 @@ def test_cli_engines_and_help(capsys):
     with pytest.raises(SystemExit) as exc:
         cli.main(["-v"])
     assert exc.value.code == 0
+
+
+def test_argument_errors_are_in_russian(capsys):
+    import pytest
+    from cast.cli import main
+    cases = {
+        ("host",): "нет команды «host»",
+        ("scan", "x", "--top", "abc"): "--top ждёт целое число, а получено «abc»",
+        ("scan", "x", "-e"): "после -e/--engine нужно указать значение",
+        ("scan", "x", "--foo"): "неизвестный параметр: --foo",
+        ("scan", "x", "--to", "3"): "неизвестный параметр",   # сокращения флагов выключены
+    }
+    for argv, expected in cases.items():
+        with pytest.raises(SystemExit) as exc:
+            main(list(argv))
+        err = capsys.readouterr().err
+        assert exc.value.code == 2 and expected in err and "Справка: cast -h" in err, (argv, err)
+        assert "invalid" not in err and "argument" not in err
+    with pytest.raises(SystemExit):
+        main(["host"])
+    assert "cast scan host" in capsys.readouterr().err

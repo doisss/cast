@@ -79,7 +79,12 @@ def _status_line(findings, section: Section) -> Text:
         line.append(f"{status}: {counts[status]}   ", style=_STATUS_STYLE[status])
     # Score считает сам Docker Bench (только зачётные проверки), берём его число из журнала
     if "score" in section.summary:
-        line.append(f"Score: {section.summary['score']}", style="bold")
+        score = section.summary["score"]
+        line.append(f"Score: {score}", style="bold")
+        # формула Docker Bench (functions/output_lib.sh): +1 за зачётный PASS, −1 за WARN
+        line.append(f"\nScore считает Docker Bench: +1 за каждый зачётный PASS ({score + counts['WARN']}), "
+                    f"−1 за каждый WARN ({counts['WARN']}). INFO и NOTE не влияют, "
+                    "и не все PASS зачётные.", style="dim")
     return line
 
 
@@ -217,41 +222,85 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         )
 
 
+# Разделы CIS Docker Benchmark: русское название (наше) и английское (как у Docker Bench).
+_BENCH_SECTIONS = {
+    "1": ("Хост", "Host Configuration"),
+    "2": ("Настройки демона Docker", "Docker daemon configuration"),
+    "3": ("Файлы настроек демона", "Docker daemon configuration files"),
+    "4": ("Образы и Dockerfile", "Container Images and Build File"),
+    "5": ("Запуск контейнеров", "Container Runtime"),
+    "6": ("Порядок на хосте", "Docker Security Operations"),
+    "7": ("Docker Swarm", "Docker Swarm Configuration"),
+}
+# Пометки Docker Bench, которые стоит показать (Automated/Scored ничего не говорят читателю).
+_BENCH_MARKS = {"Manual": "ручная", "Deprecated": "устаревшая"}
+
+
+def _bench_check_cell(finding) -> Text:
+    """Номер, название, пометки и «к чему относится» — пунктами под названием."""
+    cell = Text()
+    if finding.check_id != "—":
+        cell.append(f"{finding.check_id}  ", style="bold")
+    cell.append(finding.title)
+    for mark in finding.marks:
+        if mark in _BENCH_MARKS:
+            cell.append(f"  ({_BENCH_MARKS[mark]})", style="dim")
+        elif mark not in ("Automated", "Scored", "Not Scored"):
+            cell.append(f"  ({mark})", style="dim")
+    for item in finding.details:
+        cell.append(f"\n• {item}", style="magenta")
+    return cell
+
+
 def _print_status_table(console: Console, findings, top: int) -> None:
-    problems = list(findings)   # показываем всё, что отдал Docker Bench, включая PASS
-    if not problems:
+    """Docker Bench: по разделам CIS, в каждом — таблица WARN/NOTE/INFO, PASS одной строкой."""
+    if not findings:
         console.print("[yellow]Docker Bench не вернул ни одной проверки.[/yellow]")
         return
-    shown = problems if top <= 0 else problems[:top]
-    has_details = any(f.details for f in shown)
-    has_advice = any(f.remediation for f in shown)
-    table = Table(show_lines=True, expand=True)
-    table.add_column("Статус")
-    table.add_column("ID")
-    table.add_column("Проверка")
-    if has_details:
-        table.add_column("К чему относится")
-    if has_advice:
-        table.add_column("Что сделать")
-
-    for finding in shown:
-        row = [
-            Text(finding.status or "", style=_STATUS_STYLE.get(finding.status or "", "")),
-            Text(finding.check_id),
-            Text(finding.title),
-        ]
-        # Text, а не строка: в тексте бывают [квадратные скобки] (имя образа), rich принял бы их за разметку
-        if has_details:
-            row.append(Text("; ".join(finding.details)))
-        if has_advice:
-            row.append(Text(finding.remediation or ""))
-        table.add_row(*row)
-    console.print(table)
-    hidden = len(problems) - len(shown)
-    if hidden > 0:
-        console.print(
-            f"[dim]… и ещё {hidden}. Полный список: -f json или -f html, либо --top 0[/dim]"
-        )
+    groups: dict[str, list] = {}
+    for f in findings:   # findings уже отсортированы: WARN, NOTE, INFO, PASS, внутри по номеру
+        key = f.section or (f.check_id.split(".")[0] if f.check_id[:1].isdigit() else "?")
+        groups.setdefault(key, []).append(f)
+    hidden = 0
+    for key in sorted(groups, key=lambda k: (not k.isdigit(), int(k) if k.isdigit() else 0)):
+        items = groups[key]
+        ru, en = _BENCH_SECTIONS.get(key, ("Без раздела", ""))
+        head = Text(f"▌ {key}. {ru}" if key.isdigit() else f"▌ {ru}", style="bold")
+        if en:
+            head.append(f" · {en}", style="dim")
+        head.append("   ")
+        for status in ("WARN", "NOTE", "INFO", "PASS"):
+            n = sum(1 for f in items if f.status == status)
+            if n:
+                head.append(f"{status} {n}  ", style=_STATUS_STYLE[status])
+        console.print(head)
+        rows = [f for f in items if f.status != "PASS"]
+        shown = rows if top <= 0 else rows[:top]
+        hidden += len(rows) - len(shown)
+        if shown:
+            table = Table(show_lines=True, expand=True)
+            table.add_column("Статус", no_wrap=True)
+            table.add_column("Проверка", ratio=1)
+            has_advice = any(f.remediation for f in shown)
+            if has_advice:
+                table.add_column("Что сделать", ratio=1)
+            for f in shown:
+                row = [Text(f.status or "", style=_STATUS_STYLE.get(f.status or "", "")), _bench_check_cell(f)]
+                if has_advice:
+                    # совет к WARN — руководство к действию; к NOTE/INFO — для сведения, бледнее
+                    row.append(Text(f.remediation or "", style="" if f.status == "WARN" else "dim"))
+                table.add_row(*row)
+            console.print(table)
+            if len(rows) > len(shown):
+                console.print(f"[dim]  скрыто --top: {len(rows) - len(shown)}[/dim]")
+        passed = [f.check_id for f in items if f.status == "PASS"]
+        if passed:
+            line = Text("  PASS: ", style=_STATUS_STYLE["PASS"])
+            line.append(", ".join(passed))
+            console.print(line)
+        console.print()
+    if hidden:
+        console.print(f"[dim]Скрыто --top: {hidden}. Полный список: --top 0, -f html или -f json[/dim]")
     legend = Text()
     for i, (status, meaning) in enumerate((
         ("WARN", "нарушение рекомендации"), ("NOTE", "решение за вами"),
@@ -261,13 +310,23 @@ def _print_status_table(console: Console, findings, top: int) -> None:
             legend.append("; ", style="dim")
         legend.append(status, style=_STATUS_STYLE[status])
         legend.append(f" — {meaning}", style="dim")
-    legend.append(".", style="dim")
+    legend.append(". (ручная) — Docker Bench не может проверить это сам, посмотрите вручную.", style="dim")
     console.print(legend)
+
+
+_CONTAINER_BENCH_NOTE = (
+    "Проверены 4.1 (от какого пользователя работает контейнер) и раздел 5 «Запуск контейнеров», "
+    "то есть docker-bench-security.sh -c check_4_1,container_runtime. Поэтому проверок на одну "
+    "больше, чем при запуске только -c container_runtime, и Score может отличаться на 1."
+)
 
 
 def _print_section(console: Console, result: ScanResult, section: Section, top: int) -> None:
     if section.kind == "status":
         console.print(_status_line(section.findings, section))
+        if result.kind == "container" and section.tool == "docker-bench":
+            console.print(Text(_CONTAINER_BENCH_NOTE, style="dim"))
+        console.print()
         _print_status_table(console, section.findings, top)
     else:
         console.print(_severity_line(section.findings, section))
@@ -305,10 +364,11 @@ def render(result: ScanResult, console: Console | None = None, top: int = 0) -> 
         console.print()
 
     if result.image_scan_failed:
-        what = "Сканирование образа" if result.kind == "image" else "Проверка"
+        # «сканирование» среднего рода, «проверка» женского — глагол согласуем
+        what = "Сканирование образа НЕ выполнено" if result.kind == "image" else "Проверка НЕ выполнена"
         console.print(
             Panel(
-                f"[bold red]{what} НЕ выполнена.[/bold red]\n"
+                f"[bold red]{what}.[/bold red]\n"
                 "Главный движок для этой цели не отработал (причина указана выше), поэтому "
                 "сказать что-либо о цели нельзя. Это не значит, что всё в порядке.",
                 border_style="red",
