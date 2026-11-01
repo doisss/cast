@@ -28,8 +28,31 @@ bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh)
 | Trivy | пакет apt (репозиторий aquasecurity) |
 
 Опции: `--local` (из локальной копии), `--skip-trivy`, `--skip-docker-bench`,
-`--with-docker`, `--force`, `--dry-run`, `--ref`. Повторный запуск безопасен.
-Чужие команды `cast`/`sarbar` в `/usr/local/bin` не затираются без `--force`.
+`--with-docker`, `--force`, `--dry-run`, `--ref`, `--version`, `--list-versions`.
+Повторный запуск безопасен. Чужие команды `cast`/`sarbar` в `/usr/local/bin` не
+затираются без `--force`.
+
+### Версии
+
+Каждая стабильная версия — тег `vX.Y.Z` и релиз на странице
+[Releases](https://github.com/doisss/cast/releases); что изменилось — в
+[CHANGELOG.md](CHANGELOG.md). Поставить конкретную версию (поверх установленной
+тоже можно, это замена, а не вторая копия):
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh) --list-versions
+bash <(curl -fsSL https://raw.githubusercontent.com/doisss/cast/main/install.sh) --version v0.1.0
+```
+
+Какая версия стоит сейчас: `cast -v`.
+
+### Показ всех возможностей
+
+`bash demo/demo.sh` сам готовит цели (контейнер, архив образа, корневую ФС, образ
+диска), запускает по очереди все виды проверок и печатает каждую команду, её
+вывод, код выхода и время, в конце — сводную таблицу. `basic` — только обычные
+команды, `medium` — только новые виды целей, `--pause` — пауза перед каждой
+командой. Подробности: `bash demo/demo.sh --help`.
 
 Удаление: `sudo bash uninstall.sh` (добавьте `--with-trivy`, чтобы убрать и Trivy).
 

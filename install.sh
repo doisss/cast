@@ -37,7 +37,7 @@ CAST_HOME="/opt/cast"
 BENCH_HOME="/opt/docker-bench-security"
 BIN_DIR="/usr/local/bin"
 
-LOCAL=0 DRY=0 FORCE=0 WANT_TRIVY=1 WANT_BENCH=1 WANT_DOCKER=0
+LOCAL=0 DRY=0 FORCE=0 WANT_TRIVY=1 WANT_BENCH=1 WANT_DOCKER=0 LIST_VERSIONS=0
 
 # ------------------------------------------------------------------ вывод
 if [ -t 1 ]; then B=$'\033[1m'; G=$'\033[32m'; Y=$'\033[33m'; R=$'\033[31m'; Z=$'\033[0m'; else B=""; G=""; Y=""; R=""; Z=""; fi
@@ -55,6 +55,8 @@ cast — установщик (cast + Trivy + Docker Bench).
 
 Опции:
   --local              ставить cast из папки, где лежит этот скрипт
+  --version vX.Y.Z     поставить конкретную версию (тег релиза), например v0.1.0
+  --list-versions      показать версии, опубликованные на GitHub, и выйти
   --ref REF            ветка или тег репозитория (по умолчанию main)
   --skip-trivy         не ставить Trivy
   --skip-docker-bench  не ставить Docker Bench
@@ -73,6 +75,9 @@ while [ "$#" -gt 0 ]; do
     case "$1" in
         --local)             LOCAL=1 ;;
         --ref)               [ "$#" -ge 2 ] || die "--ref требует значение"; REF="$2"; shift ;;
+        --version)           [ "$#" -ge 2 ] || die "--version требует значение (например v0.1.0)"
+                             REF="$2"; case "$REF" in v*) ;; *) REF="v$REF" ;; esac; shift ;;
+        --list-versions)     LIST_VERSIONS=1 ;;
         --skip-trivy)        WANT_TRIVY=0 ;;
         --skip-docker-bench) WANT_BENCH=0 ;;
         --with-docker)       WANT_DOCKER=1 ;;
@@ -83,6 +88,17 @@ while [ "$#" -gt 0 ]; do
     esac
     shift
 done
+
+# Список версий: теги релизов из GitHub API, без установки и без sudo
+if [ "$LIST_VERSIONS" -eq 1 ]; then
+    json="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases")" \
+        || die "не удалось получить список релизов ${REPO} (нет интернета или репозитория)"
+    printf 'Версии cast (%s), новые сверху:\n' "$REPO"
+    tags="$(printf '%s\n' "$json" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/    \1/p')"
+    printf '%s\n' "${tags:-    (релизов пока нет)}"
+    printf '\nУстановить:  bash install.sh --version ВЕРСИЯ\n'
+    exit 0
+fi
 
 # ------------------------------------------------------------ привилегии
 SUDO=()
@@ -308,5 +324,6 @@ for name in cast sarbar; do
     fi
 done
 
+ok "версия: $("$CAST_HOME/venv/bin/cast" -v 2>/dev/null || echo неизвестна)"
 printf '\n%sГотово.%s Попробуйте:\n\n    sudo cast scan alpine:3.19\n    cast -h\n\n' "$G$B" "$Z"
 printf 'sudo нужен, потому что Docker и Docker Bench требуют доступа к демону Docker.\n'

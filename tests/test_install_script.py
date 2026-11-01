@@ -41,3 +41,12 @@ def test_unknown_option():
 def test_no_mytool_left():
     for p in list(ROOT.glob("*.sh")) + list(ROOT.glob("src/**/*.py")) + [ROOT / "pyproject.toml"]:
         assert "mytool" not in p.read_text(), p
+
+
+def test_version_option_selects_tag():
+    out = subprocess.run(["bash", str(SCRIPT), "--version", "0.1.0", "--dry-run", "--skip-trivy",
+                          "--skip-docker-bench"], capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    assert "@v0.1.0" in out.stdout          # «0.1.0» дополняется до тега «v0.1.0»
+    assert "--list-versions" in subprocess.run(["bash", str(SCRIPT), "--help"],
+                                               capture_output=True, text=True).stdout

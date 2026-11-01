@@ -1,0 +1,45 @@
+# Изменения
+
+Версии — по [semver](https://semver.org/lang/ru/): `X.Y.Z`, где Y растёт при новых
+возможностях, Z — при исправлениях. Поставить любую версию:
+`bash install.sh --version vX.Y.Z` (см. README, раздел «Версии»).
+
+## v0.2.0 — 01.11.2026
+
+Новые виды целей (cast сам определяет, что ему дали):
+
+- конфигурации: Kubernetes-манифесты, Terraform, Helm (папка или `Chart.yaml`),
+  CloudFormation, docker-compose — `trivy config`;
+- архив образа (`docker save`, OCI-архив) — `trivy image --input`;
+- корневая ФС (папка с `etc/os-release`, в том числе `/`) — `trivy rootfs`;
+- git-репозиторий по ссылке — `trivy repository`;
+- SBOM (CycloneDX, SPDX) — `trivy sbom`;
+- образ диска ВМ (`.img`, `.qcow2`, `.vmdk`, …) — `trivy vm`;
+- кластер Kubernetes (`cast scan cluster`) — `trivy kubernetes`;
+- явные формы: `cast scan config|rootfs|archive|sbom|vm|repo|container ...`.
+
+Вывод:
+
+- ошибки конфигурации собраны по месту в файле: код показан один раз, под ним
+  таблица находок и кусок YAML «в файле:» с тем, что исправить;
+- Docker Bench: проверки по разделам CIS 1–7, PASS одной строкой, объекты
+  пунктами, пометки «(ручная)» и «(устаревшая)», пояснение к Score; в скане
+  контейнера сказано, какие проверки запущены (4.1 и раздел 5);
+- одна уязвимость в разных файлах больше не склеивается в одну строку (на «/»
+  было 136 строк из 484 записей Trivy, стало столько же, сколько у Trivy);
+- ошибки ввода по-русски, сокращения флагов выключены (`--to 3` больше не
+  становится `--top 3`);
+- «Сканирование образа НЕ выполнено» (была опечатка «выполнена»).
+
+Прочее:
+
+- `demo/demo.sh` — показ всех возможностей одной командой;
+- `install.sh --version vX.Y.Z` и `--list-versions`;
+- автотестов: 107 → 197.
+
+## v0.1.0 — 18.10.2026
+
+Первая версия: образ, запущенный контейнер, Dockerfile, папка проекта
+(`trivy image`, `trivy fs`, `trivy config`), Docker-хост и контейнер по CIS
+Docker Benchmark (Docker Bench for Security), отчёты HTML и JSON, приоритет по
+`requirements.txt`, установщик `install.sh`.
