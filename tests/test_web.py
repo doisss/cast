@@ -132,4 +132,38 @@ def test_cli_web_reports_busy_port(capsys):
         s.listen()
         port = s.getsockname()[1]
         assert main(["web", "--port", str(port), "--no-browser"]) == 2
-    assert "Не удалось занять порт" in capsys.readouterr().out
+    assert "не удалось слушать" in capsys.readouterr().out
+
+
+def test_lan_mode_accepts_machine_address_only():
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    application = web.WebApp(web.JobStore(runner=_fake_runner))
+    httpd = ThreadingHTTPServer(("127.0.0.1", port),
+                                web.make_handler(application, port, ["192.168.0.196"]))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        base = f"http://127.0.0.1:{port}"
+        ok = urllib.request.Request(base + "/missing", headers={"Host": f"192.168.0.196:{port}"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(ok)
+        assert exc.value.code == 404           # адрес машины принят (страницы просто нет)
+        bad = urllib.request.Request(base + "/", headers={"Host": f"evil.example:{port}"})
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            urllib.request.urlopen(bad)
+        assert exc.value.code == 403
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+
+
+def test_lan_addresses_skip_docker_vpn_and_loopback(monkeypatch):
+    out = ("1: lo    inet 127.0.0.1/8 scope host lo\n"
+           "2: eth0    inet 192.168.0.196/24 brd 192.168.0.255 scope global eth0\n"
+           "3: docker0    inet 172.17.0.1/16 scope global docker0\n"
+           "4: br-26bf    inet 172.18.0.1/16 scope global br-26bf\n"
+           "5: amn0    inet 10.8.1.3/32 scope global amn0\n")
+    monkeypatch.setattr(web.subprocess, "run",
+                        lambda *a, **k: type("R", (), {"stdout": out})())
+    assert web._lan_addresses() == ["192.168.0.196"]

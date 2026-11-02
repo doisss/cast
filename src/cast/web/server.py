@@ -4,9 +4,10 @@ pipeline.run_scan(), что и консоль. Логика проверки н�
 принимает цель, запускает проверку в фоне и рисует ScanResult.
 
 Без новых зависимостей: встроенный http.server и Jinja2 (она уже нужна HTML-отчёту).
-Слушает только 127.0.0.1: веб запускает сканеры с правами пользователя, наружу
-его открывать нельзя. POST-запросы проверяются токеном, чтобы чужая страница в
-браузере не могла запустить проверку на этой машине.
+По умолчанию слушает только 127.0.0.1; с --host 0.0.0.0 открыт в сеть (например,
+чтобы зайти с хоста на ВМ). Запросы принимаются только по адресам этой машины, а
+POST-запросы проверяются токеном: чужая страница в браузере не может запустить
+проверку на этой машине.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ import json
 import queue
 import secrets
 import shlex
+import subprocess
 import threading
 import time
 from dataclasses import dataclass, field
@@ -255,8 +257,10 @@ class WebApp:
                            sections=sections, note=note, jobs=self.store.recent())
 
 
-def make_handler(app: WebApp, port: int):
-    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
+    """addresses — адреса этой машины, по которым к ней можно обращаться
+    (кроме 127.0.0.1 и localhost, они разрешены всегда)."""
+    allowed_hosts = {f"{a}:{port}" for a in ["127.0.0.1", "localhost", *(addresses or [])]}
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"cast-web/{__version__}"
@@ -271,21 +275,24 @@ def make_handler(app: WebApp, port: int):
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(len(data)))
             self.send_header("Cache-Control", "no-store")
-            for key, value in (extra or {}).items():
-                self.send_header(key, value)
+            for name, value in (extra or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(data)
 
-        def _host_ok(self) -> bool:
+        def _allowed(self) -> bool:
             # защита от DNS rebinding: страница с чужого домена не достучится до нас
-            return self.headers.get("Host", "") in allowed_hosts
+            if self.headers.get("Host", "") in allowed_hosts:
+                return True
+            self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
+            return False
 
         def _job(self, raw: str) -> Job | None:
             return app.store.jobs.get(int(raw)) if raw.isdigit() else None
 
         def do_GET(self):
-            if not self._host_ok():
-                return self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
+            if not self._allowed():
+                return
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             if not parts:
                 return self._send(app.page_index())
@@ -307,8 +314,8 @@ def make_handler(app: WebApp, port: int):
             return self._send(app.render("missing.html.jinja"), status=404)
 
         def do_POST(self):
-            if not self._host_ok():
-                return self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
+            if not self._allowed():
+                return
             if urlparse(self.path).path != "/jobs":
                 return self._send(app.render("missing.html.jinja"), status=404)
             length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
@@ -326,18 +333,45 @@ def make_handler(app: WebApp, port: int):
     return Handler
 
 
-def serve(port: int = 8765, open_browser: bool = True, console=None) -> int:
+def _lan_addresses() -> list[str]:
+    """IPv4-адреса этой машины в сетях, откуда можно зайти (без docker и VPN-туннелей)."""
+    try:
+        out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True,
+                             text=True, timeout=5).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return []
+    addrs = []
+    for line in out.splitlines():
+        fields = line.split()
+        if len(fields) < 4 or fields[1].startswith(("lo", "docker", "br-", "veth")):
+            continue
+        if "/32" in fields[3]:   # точка-точка (VPN) — с хоста по нему не зайти
+            continue
+        addrs.append(fields[3].split("/")[0])
+    return addrs
+
+
+def serve(port: int = 8765, open_browser: bool = True, console=None,
+          host: str = "127.0.0.1") -> int:
+    say = console.print if console else print
+    local = host in ("127.0.0.1", "localhost")
+    addresses = [] if local else (_lan_addresses() if host == "0.0.0.0" else [host])
     app = WebApp()
     try:
-        httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
+        httpd = ThreadingHTTPServer((host, port), make_handler(app, port, addresses))
     except OSError as exc:
-        msg = f"Не удалось занять порт {port}: {exc.strerror}. Укажите другой: cast web --port 8800"
-        console.print(f"[red]Ошибка:[/red] {msg}") if console else print(msg)
+        say(f"Ошибка: не удалось слушать {host}:{port}: {exc.strerror}. "
+            "Укажите другой порт: cast web --port 8800")
         return 2
     url = f"http://127.0.0.1:{port}/"
-    if console:
-        console.print(f"Веб-интерфейс cast: [bold]{url}[/bold]")
-        console.print("[dim]Доступен только с этой машины. Остановить: Ctrl+C[/dim]")
+    say(f"Веб-интерфейс cast: {url}")
+    for addr in addresses:
+        say(f"С другой машины:   http://{addr}:{port}/")
+    if local:
+        say("Доступен только с этой машины. Остановить: Ctrl+C")
+    else:
+        say("Внимание: веб открыт в сеть, любой в этой сети может запускать проверки "
+            "на этой машине. Остановить: Ctrl+C")
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
