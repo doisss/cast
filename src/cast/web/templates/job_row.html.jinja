@@ -1,0 +1,16 @@
+<a href="/jobs/{{ j.id }}">
+  {% set failed = j.state == "error" or (j.result and j.result.image_scan_failed) %}
+  <span class="dot {{ 'off' if failed else ('on' if j.state == 'done' else 'run') }}"></span>
+  <span class="mono">#{{ j.id }}</span>
+  <span>{{ j.query }}</span>
+  <span class="spacer"></span>
+  {% if j.state == "done" and j.result %}
+    {% set c = j.result.counts_by_severity %}{% set s = j.result.counts_by_status %}
+    {% if c.critical %}<span class="pill sev-critical">{{ c.critical }} CRIT</span>{% endif %}
+    {% if c.high %}<span class="pill sev-high">{{ c.high }} HIGH</span>{% endif %}
+    {% if s.WARN %}<span class="pill st-WARN">{{ s.WARN }} WARN</span>{% endif %}
+    {% if j.result.image_scan_failed %}<span class="pill sev-critical">не выполнена</span>{% endif %}
+  {% elif j.state == "error" %}<span class="pill sev-critical">ошибка</span>
+  {% elif j.state == "queued" %}<span class="muted small">в очереди</span>
+  {% else %}<span class="muted small">идёт</span>{% endif %}
+</a>

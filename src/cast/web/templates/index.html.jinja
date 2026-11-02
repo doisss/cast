@@ -1,0 +1,96 @@
+{% extends "base.html.jinja" %}
+{% block title %}cast — новая проверка{% endblock %}
+{% block body %}
+<div class="grid cols-2">
+  <div>
+    <form class="card" method="post" action="/jobs" id="scan-form">
+      <h1>Что проверить?</h1>
+      <p class="muted small" style="margin-top:0">Как в консоли: <code>cast scan ЦЕЛЬ</code>. Что это за цель, cast поймёт сам.</p>
+      <input type="hidden" name="token" value="{{ token }}">
+      <div class="row" style="flex-wrap:nowrap">
+        <input type="text" name="target" id="target" autofocus autocomplete="off"
+               placeholder="alpine:3.19, ./myapp, Dockerfile, host, https://github.com/…">
+        <button class="btn primary" type="submit">Проверить</button>
+      </div>
+
+      <p class="small muted" style="margin:.9rem 0 .35rem">Примеры</p>
+      <div class="row">
+        <span class="chip" data-fill="host">host — текущая машина</span>
+        <span class="chip" data-fill="alpine:3.19">alpine:3.19</span>
+        <span class="chip" data-fill="./myapp">./myapp</span>
+        <span class="chip" data-fill="Dockerfile">Dockerfile</span>
+        <span class="chip" data-fill="deploy.yaml">deploy.yaml</span>
+        <span class="chip" data-fill="cluster">cluster</span>
+      </div>
+
+      {% if suggest.containers %}
+      <p class="small muted" style="margin:.9rem 0 .35rem">Запущенные контейнеры</p>
+      <div class="row">
+        {% for c in suggest.containers %}
+        <span class="chip" data-fill="container {{ c.name }}" title="образ {{ c.image }}">▣ {{ c.name }}</span>
+        {% endfor %}
+      </div>
+      {% endif %}
+      {% if suggest.images %}
+      <p class="small muted" style="margin:.9rem 0 .35rem">Образы на этой машине</p>
+      <div class="row">
+        {% for i in suggest.images %}<span class="chip" data-fill="{{ i }}">{{ i }}</span>{% endfor %}
+      </div>
+      {% endif %}
+      {% if not suggest.docker %}
+      <p class="small muted" style="margin-top:.9rem">Docker не отвечает: списка контейнеров и образов не будет.</p>
+      {% endif %}
+
+      <details style="margin-top:1rem">
+        <summary>Дополнительно</summary>
+        <p class="small muted" style="margin:.6rem 0 .3rem">Движки (если ничего не выбрано, cast выберет сам)</p>
+        <div class="row">
+          {% for e in engines %}
+          <label class="chip"><input type="checkbox" name="engine" value="{{ e.name }}"
+                 {% if not e.available %}disabled{% endif %}> {{ e.name }}</label>
+          {% endfor %}
+        </div>
+        <p class="small muted" style="margin:.8rem 0 .3rem">requirements.txt для приоритета (путь на этой машине)</p>
+        <input type="text" name="requirements" placeholder="./myapp/requirements.txt">
+      </details>
+    </form>
+
+    {% if jobs %}
+    <div class="card">
+      <h2>Проверки в этом запуске</h2>
+      <div class="jobs" style="margin-top:.5rem">
+        {% for j in jobs %}{% include "job_row.html.jinja" %}{% endfor %}
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>Движки</h2>
+      {% for e in engines %}
+      <div style="margin-top:.8rem">
+        <div class="row"><span class="dot {{ 'on' if e.available else 'off' }}"></span>
+          <strong>{{ e.name }}</strong>
+          <span class="muted small">{{ e.version or "не установлен" }}</span></div>
+        {% if e.path %}<div class="mono muted small">{{ e.path }}</div>{% endif %}
+        <div class="small">{{ e.description }}</div>
+        <div class="small muted">умеет: {{ e.targets | join(", ") }}</div>
+      </div>
+      {% endfor %}
+    </div>
+    <div class="card small muted">
+      cast запускает Trivy и Docker Bench и показывает то, что нашли они, ничего не добавляя от себя.
+      Проверки идут по одной; пути указываются на этой машине.
+    </div>
+  </div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+  document.querySelectorAll("[data-fill]").forEach(el => el.addEventListener("click", () => {
+    const input = document.getElementById("target");
+    input.value = el.dataset.fill; input.focus();
+  }));
+</script>
+{% endblock %}

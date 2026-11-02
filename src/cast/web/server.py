@@ -1,0 +1,348 @@
+"""
+Веб-интерфейс cast: `cast web` поднимает страницу в браузере поверх того же
+pipeline.run_scan(), что и консоль. Логика проверки не дублируется: веб только
+принимает цель, запускает проверку в фоне и рисует ScanResult.
+
+Без новых зависимостей: встроенный http.server и Jinja2 (она уже нужна HTML-отчёту).
+Слушает только 127.0.0.1: веб запускает сканеры с правами пользователя, наружу
+его открывать нельзя. POST-запросы проверяются токеном, чтобы чужая страница в
+браузере не могла запустить проверку на этой машине.
+"""
+
+from __future__ import annotations
+
+import json
+import queue
+import secrets
+import shlex
+import threading
+import time
+from dataclasses import dataclass, field
+from http import HTTPStatus
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
+from jinja2 import Environment, FileSystemLoader, select_autoescape
+
+from cast import __version__
+from cast.context import ScanContext
+from cast.pipeline import EngineSelectionError, ScanResult, run_scan
+from cast.report import html_report, json_report
+from cast.report.console import _BENCH_MARKS, _BENCH_SECTIONS
+from cast.report.sections import (STATUS_HELP, build_sections, container_image_note,
+                                  sort_status_findings)
+from cast.scanners import ALL_SCANNERS, ProgressUI
+from cast.targets import KIND_TITLES, Target, TargetError, resolve_target, run_docker
+
+_TEMPLATES_DIR = Path(__file__).parent / "templates"
+_SEVERITIES = ("critical", "high", "medium", "low", "unknown")
+
+
+@dataclass
+class Job:
+    """Одна проверка, запущенная из браузера."""
+
+    id: int
+    query: str
+    engines: list[str] | None
+    requirements: str = ""
+    state: str = "queued"          # queued | running | done | error
+    target: Target | None = None
+    engine: str = ""               # какой движок работает сейчас
+    text: str = ""                 # что он делает (ProgressUI.say)
+    fraction: float | None = None  # полоса загрузки (ProgressUI.progress)
+    label: str = ""
+    log: list[str] = field(default_factory=list)
+    error: str = ""
+    result: ScanResult | None = None
+    created: float = field(default_factory=time.time)
+    started: float = 0.0
+    finished: float = 0.0
+
+    def status(self) -> dict:
+        now = self.finished or time.time()
+        return {
+            "id": self.id, "state": self.state, "engine": self.engine, "text": self.text,
+            "fraction": self.fraction, "label": self.label, "log": self.log[-30:],
+            "error": self.error,
+            "seconds": round(now - self.started, 1) if self.started else 0,
+        }
+
+
+class _JobUI(ProgressUI):
+    def __init__(self, job: Job):
+        self.job = job
+
+    def say(self, text: str) -> None:
+        self.job.text = text
+        self.job.fraction = None
+        self.job.log.append(f"{self.job.engine}: {text}")
+
+    def progress(self, fraction: float, label: str = "") -> None:
+        self.job.fraction = max(0.0, min(1.0, fraction))
+        self.job.label = label
+
+
+class JobStore:
+    """Очередь проверок. Проверки идут по одной: два Trivy одновременно
+    спорили бы за свою базу уязвимостей."""
+
+    def __init__(self, runner=run_scan):
+        self.jobs: dict[int, Job] = {}
+        self._queue: queue.Queue[Job] = queue.Queue()
+        self._lock = threading.Lock()
+        self._next = 1
+        self._runner = runner
+        threading.Thread(target=self._work, daemon=True, name="cast-web-worker").start()
+
+    def submit(self, query: str, engines: list[str] | None, requirements: str = "") -> Job:
+        with self._lock:
+            job = Job(self._next, query, engines, requirements)
+            self._next += 1
+            self.jobs[job.id] = job
+        self._queue.put(job)
+        return job
+
+    def recent(self) -> list[Job]:
+        return sorted(self.jobs.values(), key=lambda j: j.id, reverse=True)
+
+    def _work(self) -> None:
+        while True:
+            job = self._queue.get()
+            try:
+                self._run(job)
+            except Exception as exc:  # веб не должен падать из-за одной проверки
+                job.state, job.error = "error", f"внутренняя ошибка: {exc}"
+            job.finished = time.time()
+
+    def _run(self, job: Job) -> None:
+        job.state, job.started = "running", time.time()
+        try:
+            target = resolve_target(shlex.split(job.query))
+        except (TargetError, ValueError) as exc:
+            job.state, job.error = "error", str(exc)
+            return
+        job.target = target
+        job.log.extend(f"ⓘ {note}" for note in target.notes)
+        context = ScanContext.empty()
+        if job.requirements:
+            path = Path(job.requirements).expanduser()
+            if path.exists():
+                context = ScanContext.from_requirements_file(path)
+            else:
+                job.log.append(f"⚠ файл {path} не найден, приоритизация по зависимостям отключена")
+
+        def on_progress(event: str, scanner, detail: str = "") -> None:
+            if event == "start":
+                job.engine, job.fraction = scanner.name, None
+                job.text = scanner.progress_hint or "работаю"
+                job.log.append(f"{scanner.name}: запущен")
+            elif event == "done":
+                job.log.append(f"{scanner.name}: готово, записей: {detail}")
+            elif event == "fail":
+                job.log.append(f"{scanner.name}: НЕ ВЫПОЛНЕН: {detail}")
+
+        try:
+            job.result = self._runner(target, context=context, on_progress=on_progress,
+                                      engines=job.engines, ui=_JobUI(job))
+        except EngineSelectionError as exc:
+            job.state, job.error = "error", str(exc)
+            return
+        job.state = "done"
+
+
+def engines_info() -> list[dict]:
+    """То же, что `cast engines`, но данными."""
+    info = []
+    for cls in ALL_SCANNERS:
+        engine = cls()
+        available = engine.is_available()
+        info.append({
+            "name": engine.name,
+            "available": available,
+            "version": engine.version() if available else None,
+            "path": engine.path() if available else None,
+            "description": engine.description,
+            "targets": [KIND_TITLES[k] for k in KIND_TITLES if k in engine.targets],
+        })
+    return info
+
+
+def docker_suggestions() -> dict:
+    """Запущенные контейнеры и локальные образы — чтобы выбрать цель одним щелчком."""
+    containers, images = [], []
+    ps = run_docker("ps", "--format", "{{.Names}}\t{{.Image}}")
+    if ps is not None and ps.returncode == 0:
+        for line in ps.stdout.splitlines():
+            name, _, image = line.partition("\t")
+            if name:
+                containers.append({"name": name, "image": image})
+    im = run_docker("images", "--format", "{{.Repository}}:{{.Tag}}")
+    if im is not None and im.returncode == 0:
+        images = [x for x in im.stdout.splitlines() if x and "<none>" not in x][:12]
+    return {"docker": ps is not None and ps.returncode == 0,
+            "containers": containers, "images": images}
+
+
+def _sev_counts(findings) -> dict[str, int]:
+    counts = dict.fromkeys(_SEVERITIES, 0)
+    for f in findings:
+        counts[f.severity.value] += 1
+    return counts
+
+
+def _status_counts(findings) -> dict[str, int]:
+    counts = {"WARN": 0, "NOTE": 0, "INFO": 0, "PASS": 0}
+    for f in findings:
+        if f.status in counts:
+            counts[f.status] += 1
+    return counts
+
+
+def _bench_groups(findings) -> list[dict]:
+    groups: dict[str, list] = {}
+    for f in sort_status_findings(findings):
+        groups.setdefault(f.section or "", []).append(f)
+    out = []
+    for key in sorted(groups, key=lambda k: (not k.isdigit(), int(k) if k.isdigit() else 0)):
+        ru, en = _BENCH_SECTIONS.get(key, ("Без раздела", ""))
+        out.append({"key": key, "ru": ru, "en": en, "findings": groups[key],
+                    "counts": _status_counts(groups[key])})
+    return out
+
+
+def _marks(finding) -> list[str]:
+    out = []
+    for mark in finding.marks:
+        if mark in _BENCH_MARKS:
+            out.append(_BENCH_MARKS[mark])
+        elif mark not in ("Automated", "Scored", "Not Scored"):
+            out.append(mark)
+    return out
+
+
+class WebApp:
+    def __init__(self, store: JobStore | None = None):
+        self.store = store or JobStore()
+        self.token = secrets.token_urlsafe(24)
+        self.env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR),
+                               autoescape=select_autoescape(["html", "jinja"]))
+        self.env.globals.update(version=__version__, token=self.token,
+                                kind_titles=KIND_TITLES, status_help=STATUS_HELP,
+                                marks=_marks)
+
+    def render(self, name: str, **ctx) -> str:
+        return self.env.get_template(name).render(**ctx)
+
+    def page_index(self) -> str:
+        return self.render("index.html.jinja", engines=engines_info(),
+                           suggest=docker_suggestions(), jobs=self.store.recent())
+
+    def page_job(self, job: Job) -> str:
+        sections, note = [], ""
+        if job.result is not None:
+            note = container_image_note(job.result)
+            for sec in build_sections(job.result):
+                data = {"sec": sec}
+                if sec.kind == "status":
+                    data["groups"] = _bench_groups(sec.findings)
+                    data["counts"] = _status_counts(sec.findings)
+                else:
+                    data["counts"] = _sev_counts(sec.findings)
+                sections.append(data)
+        return self.render("job.html.jinja", job=job, result=job.result,
+                           sections=sections, note=note, jobs=self.store.recent())
+
+
+def make_handler(app: WebApp, port: int):
+    allowed_hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+
+    class Handler(BaseHTTPRequestHandler):
+        server_version = f"cast-web/{__version__}"
+
+        def log_message(self, fmt, *args):  # журнал запросов не нужен в терминале
+            pass
+
+        def _send(self, body: str | bytes, ctype: str = "text/html; charset=utf-8",
+                  status: int = 200, extra: dict | None = None) -> None:
+            data = body.encode("utf-8") if isinstance(body, str) else body
+            self.send_response(status)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Length", str(len(data)))
+            self.send_header("Cache-Control", "no-store")
+            for key, value in (extra or {}).items():
+                self.send_header(key, value)
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _host_ok(self) -> bool:
+            # защита от DNS rebinding: страница с чужого домена не достучится до нас
+            return self.headers.get("Host", "") in allowed_hosts
+
+        def _job(self, raw: str) -> Job | None:
+            return app.store.jobs.get(int(raw)) if raw.isdigit() else None
+
+        def do_GET(self):
+            if not self._host_ok():
+                return self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
+            parts = [p for p in urlparse(self.path).path.split("/") if p]
+            if not parts:
+                return self._send(app.page_index())
+            if parts[0] == "jobs" and len(parts) >= 2 and (job := self._job(parts[1])):
+                if len(parts) == 2:
+                    return self._send(app.page_job(job))
+                if parts[2] == "status":
+                    return self._send(json.dumps(job.status(), ensure_ascii=False),
+                                      "application/json; charset=utf-8")
+                if parts[2] in ("report.html", "report.json") and job.result is not None:
+                    if parts[2] == "report.html":
+                        body, ctype = html_report.render_html(job.result), "text/html; charset=utf-8"
+                    else:
+                        body = json.dumps(json_report.to_dict(job.result), ensure_ascii=False, indent=2)
+                        ctype = "application/json; charset=utf-8"
+                    name = f"cast-{job.id}.{parts[2].split('.')[1]}"
+                    return self._send(body, ctype,
+                                      extra={"Content-Disposition": f'attachment; filename="{name}"'})
+            return self._send(app.render("missing.html.jinja"), status=404)
+
+        def do_POST(self):
+            if not self._host_ok():
+                return self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
+            if urlparse(self.path).path != "/jobs":
+                return self._send(app.render("missing.html.jinja"), status=404)
+            length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
+            form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+            sent = form.get("token", [""])[0].encode("utf-8")
+            if not secrets.compare_digest(sent, app.token.encode("utf-8")):
+                return self._send("Устаревшая страница, обновите её", "text/plain; charset=utf-8", 403)
+            query = form.get("target", [""])[0].strip()
+            if not query:
+                return self._send("", status=303, extra={"Location": "/"})
+            engines = form.get("engine") or None
+            job = app.store.submit(query, engines, form.get("requirements", [""])[0].strip())
+            return self._send("", status=303, extra={"Location": f"/jobs/{job.id}"})
+
+    return Handler
+
+
+def serve(port: int = 8765, open_browser: bool = True, console=None) -> int:
+    app = WebApp()
+    try:
+        httpd = ThreadingHTTPServer(("127.0.0.1", port), make_handler(app, port))
+    except OSError as exc:
+        msg = f"Не удалось занять порт {port}: {exc.strerror}. Укажите другой: cast web --port 8800"
+        console.print(f"[red]Ошибка:[/red] {msg}") if console else print(msg)
+        return 2
+    url = f"http://127.0.0.1:{port}/"
+    if console:
+        console.print(f"Веб-интерфейс cast: [bold]{url}[/bold]")
+        console.print("[dim]Доступен только с этой машины. Остановить: Ctrl+C[/dim]")
+    if open_browser:
+        import webbrowser
+        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+    try:
+        httpd.serve_forever()
+    finally:
+        httpd.server_close()
+    return 0

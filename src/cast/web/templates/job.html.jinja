@@ -1,0 +1,195 @@
+{% extends "base.html.jinja" %}
+{% block title %}cast — {{ job.query }}{% endblock %}
+{% block body %}
+<div class="row" style="margin-bottom:1rem">
+  <div>
+    <h1>{{ job.target.label if job.target else job.query }}</h1>
+    <div class="muted small">
+      проверка #{{ job.id }} ·
+      {% if job.target %}{{ kind_titles.get(job.target.kind, job.target.kind) }}{% if job.target.subtype %} ({{ job.target.subtype }}){% endif %} · {% endif %}
+      <code>cast scan {{ job.query }}{% if job.engines %} -e {{ job.engines | join(",") }}{% endif %}</code>
+    </div>
+  </div>
+  <span class="spacer"></span>
+  {% if result %}
+  <a class="btn" href="/jobs/{{ job.id }}/report.html">↓ HTML</a>
+  <a class="btn" href="/jobs/{{ job.id }}/report.json">↓ JSON</a>
+  {% endif %}
+</div>
+
+{% if job.state in ("queued", "running") %}
+<div class="card" id="live">
+  <div class="row"><span class="dot run"></span><strong id="live-engine">{{ job.engine or "в очереди" }}</strong>
+    <span class="muted" id="live-text">{{ job.text }}</span><span class="spacer"></span>
+    <span class="muted small mono" id="live-time"></span></div>
+  <div class="bar indet" id="live-bar" style="margin-top:.8rem"><div></div></div>
+  <div class="muted small" id="live-label" style="margin-top:.3rem"></div>
+  <div class="log mono" id="live-log"></div>
+</div>
+{% elif job.state == "error" %}
+<div class="banner bad">Ошибка: {{ job.error }}</div>
+<a class="btn" href="/">Новая проверка</a>
+{% endif %}
+
+{% if result %}
+<div class="card">
+  {% for r in result.runs %}
+  <div class="row small">
+    <span class="dot {{ 'on' if r.status == 'ok' else 'off' }}"></span>
+    <strong>{{ r.name }}</strong>
+    {% if r.status == "ok" %}<span class="muted">готово за {{ "%.1f" | format(r.seconds) }} с, записей: {{ r.findings }}</span>
+    {% else %}<span style="color:var(--crit)">НЕ ВЫПОЛНЕН: {{ r.detail }}</span>{% endif %}
+  </div>
+  {% endfor %}
+</div>
+
+{% if result.image_scan_failed %}
+<div class="banner bad">Проверка НЕ выполнена: главный движок для этой цели не отработал. Это не значит, что всё в порядке.</div>
+{% endif %}
+
+{% for item in sections %}{% set sec = item.sec %}
+<div class="card" data-section>
+  <div class="section-head">
+    <h2>{{ sec.title }}</h2>
+    <span class="muted small">{{ sec.tool }}{% if sec.extra %}, {{ sec.extra }}{% endif %}</span>
+  </div>
+
+  {% if sec.kind == "status" %}
+    <div class="row">
+      {% for st in ["WARN", "NOTE", "INFO", "PASS"] %}
+      <span class="chip" data-filter="{{ st }}" title="{{ status_help[st] }}">
+        <span class="pill st-{{ st }}">{{ st }}</span> {{ item.counts[st] }}</span>
+      {% endfor %}
+      {% if "score" in sec.summary %}<span class="spacer"></span><strong>Score: {{ sec.summary.score }}</strong>{% endif %}
+    </div>
+    {% if "score" in sec.summary %}
+    <p class="muted small" style="margin:.5rem 0 0">Score считает Docker Bench: +1 за каждый зачётный PASS
+      ({{ sec.summary.score + item.counts.WARN }}), −1 за каждый WARN ({{ item.counts.WARN }}).
+      INFO и NOTE не влияют, и не все PASS зачётные.</p>
+    {% endif %}
+    {% if not sec.findings %}<p>Docker Bench не вернул ни одной проверки.</p>{% endif %}
+    {% set has_fix = sec.findings | selectattr("remediation") | list | length > 0 %}
+    {% for g in item.groups %}
+      <div class="group-title">{{ g.key ~ ". " if g.key }}{{ g.ru }} <span class="muted">{{ g.en }}</span>
+        <span class="spacer"></span>
+        <span class="small muted" style="font-weight:400">{% for st in ["WARN","NOTE","INFO","PASS"] if g.counts[st] %}{{ st }} {{ g.counts[st] }}{{ " · " if not loop.last }}{% endfor %}</span>
+      </div>
+      <div class="table-wrap"><table>
+        <thead><tr><th style="width:5.5rem">Статус</th><th>Проверка</th>{% if has_fix %}<th style="width:38%">Что сделать</th>{% endif %}</tr></thead>
+        <tbody>
+        {% for f in g.findings %}
+          <tr data-row data-key="{{ f.status }}" class="{{ 'is-pass' if f.status == 'PASS' }}"
+              data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (f.details | join(' '))) | lower }}">
+            <td><span class="pill st-{{ f.status }}">{{ f.status }}</span></td>
+            <td>
+              {% if f.check_id != "—" %}<strong class="mono">{{ f.check_id }}</strong> {% endif %}{{ f.title }}
+              {% for m in marks(f) %}<span class="muted small"> ({{ m }})</span>{% endfor %}
+              {% if f.details %}<ul class="details">{% for d in f.details %}<li>{{ d }}</li>{% endfor %}</ul>{% endif %}
+            </td>
+            {% if has_fix %}<td class="small">
+              {% if f.status != "PASS" %}{{ f.remediation or "" }}
+              {% if f.remediation_impact %}<div class="sub-line">Чем грозит: {{ f.remediation_impact }}</div>{% endif %}{% endif %}
+            </td>{% endif %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table></div>
+    {% endfor %}
+
+  {% else %}
+    <div class="row">
+      {% for sev in ["critical", "high", "medium", "low", "unknown"] if item.counts[sev] %}
+      <span class="chip" data-filter="{{ sev }}"><span class="pill sev-{{ sev }}">{{ sev | upper }}</span> {{ item.counts[sev] }}</span>
+      {% endfor %}
+      <span class="spacer"></span>
+      {% if sec.findings %}<input type="text" data-search-input placeholder="Поиск: CVE, пакет, файл" style="max-width:260px">{% endif %}
+    </div>
+    {% if sec.findings %}
+    {% set has_pkg = sec.findings | selectattr("package") | list | length > 0 %}
+    {% set has_loc = sec.findings | selectattr("location") | list | length > 0 %}
+    <div class="table-wrap" style="margin-top:.6rem"><table>
+      <thead><tr><th style="width:6.5rem">Уровень</th><th>Находка</th>
+        {% if has_pkg %}<th>Пакет</th><th>Версия → исправлено в</th>{% endif %}
+        {% if has_loc %}<th>Где</th>{% endif %}
+        <th title="Приоритет, который считает cast">Приор.</th></tr></thead>
+      <tbody>
+      {% for f in sec.findings %}
+        <tr data-row data-key="{{ f.severity.value }}"
+            data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (f.package or '') ~ ' ' ~ (f.location or '')) | lower }}">
+          <td><span class="pill sev-{{ f.severity.value }}">{{ f.severity.value | upper }}</span></td>
+          <td>
+            {% if f.url %}<a class="mono" href="{{ f.url }}" target="_blank" rel="noopener">{{ f.check_id }}</a>
+            {% else %}<span class="mono">{{ f.check_id }}</span>{% endif %}
+            <div>{{ f.title }}</div>
+            {% if f.remediation %}<div class="fix">Как исправить: {{ f.remediation }}</div>{% endif %}
+            {% if f.code_lines %}
+            <details><summary>код в файле</summary><pre class="code">{% for l in f.code_lines %}<span class="{{ 'cause' if l.is_cause }}">{{ "%4s" | format(l.number) }}  {{ l.content }}</span>
+{% endfor %}</pre></details>
+            {% endif %}
+            {% if f.priority_reasons %}<div class="sub-line">{{ f.priority_reasons | join("; ") }}</div>{% endif %}
+          </td>
+          {% if has_pkg %}
+          <td class="mono">{{ f.package or "—" }}</td>
+          <td class="mono small">{{ f.installed_version or "—" }}{% if f.fixed_version %}<br><span style="color:var(--ok)">→ {{ f.fixed_version }}</span>{% elif f.package %}<br><span class="muted">исправления нет</span>{% endif %}</td>
+          {% endif %}
+          {% if has_loc %}<td class="mono small">{{ f.location or "—" }}</td>{% endif %}
+          <td class="mono">{{ f.priority_score }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table></div>
+    <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
+    {% elif sec.note %}<p>{{ sec.note }}</p>
+    {% else %}<p class="banner" style="background:var(--ok-soft);color:var(--ok)">Проблем не найдено.</p>{% endif %}
+  {% endif %}
+</div>
+{% endfor %}
+
+{% if note %}<div class="banner note">{{ note }}</div>{% endif %}
+{% endif %}
+{% endblock %}
+
+{% block scripts %}
+<script>
+{% if job.state in ("queued", "running") %}
+  (function poll() {
+    fetch("/jobs/{{ job.id }}/status").then(r => r.json()).then(s => {
+      if (s.state === "done" || s.state === "error") { location.reload(); return; }
+      document.getElementById("live-engine").textContent = s.engine || "в очереди";
+      document.getElementById("live-text").textContent = s.text || "";
+      document.getElementById("live-time").textContent = s.seconds ? s.seconds.toFixed(0) + " с" : "";
+      const bar = document.getElementById("live-bar");
+      if (s.fraction === null) { bar.classList.add("indet"); bar.firstElementChild.style.width = ""; }
+      else { bar.classList.remove("indet"); bar.firstElementChild.style.width = (s.fraction * 100) + "%"; }
+      document.getElementById("live-label").textContent = s.label || "";
+      const log = document.getElementById("live-log");
+      log.textContent = s.log.join("\n");
+      log.style.whiteSpace = "pre-wrap";
+      log.scrollTop = log.scrollHeight;
+      setTimeout(poll, 800);
+    }).catch(() => setTimeout(poll, 2000));
+  })();
+{% endif %}
+  // фильтр по уровню/статусу и поиск — внутри каждого раздела отдельно
+  document.querySelectorAll("[data-section]").forEach(sec => {
+    const off = new Set();
+    const search = sec.querySelector("[data-search-input]");
+    const apply = () => {
+      const q = search ? search.value.trim().toLowerCase() : "";
+      let shown = 0;
+      sec.querySelectorAll("[data-row]").forEach(row => {
+        const ok = !off.has(row.dataset.key) && (!q || row.dataset.search.includes(q));
+        row.classList.toggle("hidden", !ok); if (ok) shown++;
+      });
+      const empty = sec.querySelector("[data-empty]");
+      if (empty) empty.classList.toggle("hidden", shown > 0);
+    };
+    sec.querySelectorAll("[data-filter]").forEach(chip => chip.addEventListener("click", () => {
+      const k = chip.dataset.filter;
+      off.has(k) ? off.delete(k) : off.add(k);
+      chip.classList.toggle("off", off.has(k)); apply();
+    }));
+    if (search) search.addEventListener("input", apply);
+  });
+</script>
+{% endblock %}

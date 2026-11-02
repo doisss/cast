@@ -42,11 +42,13 @@ CAST — Container Automated Security Testing
   cast scan ЦЕЛЬ [-e ДВИЖОК] [-f ФОРМАТ] [-o ФАЙЛ] [--requirements ПУТЬ]
                  [--top N]
   cast engines
+  cast web [--port N] [--no-browser]
   cast -h | -v
 
 КОМАНДЫ
   scan      проверить цель и показать отчёт
   engines   показать движки: установлены ли, версия, что умеют проверять
+  web       открыть веб-интерфейс в браузере (только с этой машины)
 
 ЦЕЛЬ — что проверять (вид определяется по записи, угадывать не нужно)
   alpine:3.19, nginx      образ: любое имя без «./» и «/»
@@ -183,8 +185,8 @@ def _russian_error(message: str) -> str:
     m = re.match(r"argument КОМАНДА: invalid choice: '?([^' ]*)'? \(choose from (.*)\)", message)
     if m:
         wrong = m.group(1)
-        text = f"нет команды «{wrong}». Команды: scan, engines"
-        if wrong in RESERVED_WORDS or wrong not in ("scan", "engines"):
+        text = f"нет команды «{wrong}». Команды: scan, engines, web"
+        if wrong in RESERVED_WORDS or wrong not in ("scan", "engines", "web"):
             text += f". Может быть, вы имели в виду: cast scan {wrong}"
         return text
     m = re.match(r"argument ([^:]+): invalid int value: '?([^']*)'?", message)
@@ -233,6 +235,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     engines_parser = subparsers.add_parser("engines", add_help=False, usage="cast engines")
     engines_parser.add_argument("-h", "--help", action=_HelpAction)
+
+    web_parser = subparsers.add_parser("web", add_help=False,
+                                       usage="cast web [--port N] [--no-browser]")
+    web_parser.add_argument("-h", "--help", action=_HelpAction)
+    web_parser.add_argument("--port", type=int, default=8765, metavar="N")
+    web_parser.add_argument("--no-browser", action="store_true")
     return parser
 
 
@@ -406,6 +414,9 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_scan(args, console)
         if args.command == "engines":
             return cmd_engines(console)
+        if args.command == "web":
+            from cast.web.server import serve
+            return serve(args.port, open_browser=not args.no_browser, console=console)
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано пользователем.[/yellow]")
         return 130
