@@ -8,6 +8,7 @@
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 
@@ -32,6 +33,23 @@ def find_binary(name: str, install_hint: str = "") -> str:
     if path is None:
         raise BinaryNotFoundError(name, install_hint)
     return path
+
+
+def find_all_binaries(name: str) -> list[str]:
+    """Все копии программы в PATH по порядку, без повторов: ссылка на тот же файл
+    (~/.local/bin/trivy → ~/.sarbar/bin/trivy) считается одной копией. Первая —
+    та, которую запустит find_binary."""
+    found: list[str] = []
+    seen: set[Path] = set()
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        path = shutil.which(name, path=folder) if folder else None
+        if path is None:
+            continue
+        real = Path(path).resolve()
+        if real not in seen:
+            seen.add(real)
+            found.append(path)
+    return found
 
 
 def ensure_dir(path: Path) -> Path:

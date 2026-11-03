@@ -96,6 +96,9 @@ class Finding:
     # Что сделать, чтобы исправить (у Trivy — Resolution, у Docker Bench — remediation).
     remediation: str | None = None
     remediation_impact: str | None = None   # чем грозит исправление (Docker Bench)
+    # Что именно не так в этом файле (у Trivy — Message: «'--no-install-recommends' flag is
+    # missed: 'apt-get update && ...'»). Title и Resolution у правила одни на все файлы.
+    message: str | None = None
     # Страница с описанием (у Trivy — PrimaryURL).
     url: str | None = None
     # Статус исправления уязвимости у Trivy: fixed / affected / will_not_fix / ...
@@ -140,6 +143,7 @@ class Finding:
             "marks": self.marks,
             "remediation": self.remediation,
             "remediation_impact": self.remediation_impact,
+            "message": self.message,
             "url": self.url,
             "fix_status": self.fix_status,
             "confirmed_by": self.confirmed_by,

@@ -82,8 +82,9 @@ def test_severity_table_has_versions_status_link_and_row_lines():
                         runs=[ScannerRun("trivy", "image", "ok", "", 1, 1.0)])
     out = _render(result)
     for text in ("Установлена", "Исправлено в", "2.25.0", "2.31.0",
-                 "https://avd.aquasec.com/nvd/cve-1", "Источник", "(trivy,"):
+                 "https://avd.aquasec.com/nvd/cve-1", "(trivy,"):
         assert text in out
+    assert "Источник" not in out and "Приоритет" not in out
     assert "готово, записей" not in out and "нет фикса" not in out
     assert out.lstrip().startswith("✓ Уязвимости образа x")
     assert "├" in out or "╞" in out or "┣" in out or "─┼" in out  # линии между строками

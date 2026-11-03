@@ -61,13 +61,15 @@ def test_single_line_place_has_no_range():
      ["containers:", "  - securityContext:", "      runAsUser: <значение>"]),
     ("KSV-0110", "Set 'metadata.namespace' to a non-default namespace.",
      ["metadata:", "  namespace: <значение>"]),
+    # путь без кавычек, значение — до пути, drop в YAML — список
+    ("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop.",
+     ["containers:", "  - securityContext:", "      capabilities:", "        drop:", "          - ALL"]),
 ])
 def test_yaml_hint_from_trivy_path(check_id, text, expected):
     assert yaml_hint(check_id, text) == expected
 
 
 @pytest.mark.parametrize("check_id, text", [
-    ("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop."),   # путь без кавычек
     ("KSV-0106", "Set 'spec.containers[*].securityContext.capabilities.drop' to 'ALL' and only add "
                  "'NET_BIND_SERVICE' to 'spec.containers[*].securityContext.capabilities.add'."),
     ("KSV-0104", "Specify seccomp either by annotation or by seccomp profile type"),
@@ -100,14 +102,14 @@ def test_config_findings_grouped_by_place_with_code_once():
     assert "▌ deploy.yaml:14-17  3 шт." in out
     assert "▌ deploy.yaml:3-4  1 шт." in out
     assert out.index("deploy.yaml:14-17") < out.index("deploy.yaml:3-4")   # сначала место с HIGH
-    assert "в файле:" in out and "privileged: false" in out
+    assert "в файле:" not in out and "privileged: false" in out
     # текст Trivy остаётся как есть
     assert "Change 'containers[].securityContext.privileged' to 'false'." in out
     assert "Приоритет" not in out and "Источник" not in out
     assert json_report.to_dict(result)["findings"][0]["code_lines"]
 
 
-def test_place_without_code_is_said_honestly():
+def test_place_without_lines_is_whole_file():
     raw = json.dumps({"Results": [{"Target": "node", "Misconfigurations": [
         _mis("KCV-0001", "HIGH", "x", None, None, [])]}]})
 
@@ -118,7 +120,8 @@ def test_place_without_code_is_said_honestly():
     result = run_scan(Target("config", "deploy.yaml"), scanners=[NoCode()])
     buf = StringIO()
     console_report.render(result, console=Console(file=buf, width=140, force_terminal=False))
-    assert "Trivy не прислал строки кода" in buf.getvalue()
+    assert "▌ node — весь файл" in buf.getvalue()
+    assert "Trivy не прислал строки кода" not in buf.getvalue()
 
 
 def test_other_targets_keep_the_table():
@@ -129,7 +132,8 @@ def test_other_targets_keep_the_table():
     buf = StringIO()
     console_report.render(result, console=Console(file=buf, width=200, force_terminal=False))
     out = buf.getvalue()
-    assert "Приоритет" in out and "▌" not in out
+    assert "Что не так" not in out and "▌" not in out   # обычная таблица, не группы по месту
+    assert "Приоритет" not in out and "Источник" not in out   # остались в JSON и HTML
 
 
 def test_top_hides_rows_but_not_the_real_count_of_a_place():

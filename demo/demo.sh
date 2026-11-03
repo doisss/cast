@@ -19,7 +19,9 @@
 #   -h, --help         эта справка
 #
 # Переменные: CAST — какую команду запускать (по умолчанию cast из PATH),
-#             DEMO_LOG — куда писать журнал (по умолчанию ./cast-demo-ДАТА.log).
+#             DEMO_LOG — куда писать журнал (по умолчанию ./cast-demo-ДАТА.log),
+#             DEMO_RESULTS — файл, куда записать итог строками «команда|код|секунды»
+#             (его читает realtests/run.sh).
 #
 # Что нужно: установленный cast (install.sh ставит и Trivy, и Docker Bench),
 # Docker, sudo (Docker Bench проверяет хост от root), интернет (образы, база
@@ -41,7 +43,7 @@ while [ "$#" -gt 0 ]; do
         --top)            [ "$#" -ge 2 ] || { echo "--top требует число" >&2; exit 2; }; TOP="$2"; shift ;;
         --skip-cluster)   SKIP_CLUSTER=1 ;;
         --skip-repo)      SKIP_REPO=1 ;;
-        -h|--help)        sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help)        sed -n '2,/^[^#]/{/^#/p}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *)                echo "неизвестный параметр: $1 (см. --help)" >&2; exit 2 ;;
     esac
     shift
@@ -55,7 +57,15 @@ LOG="${DEMO_LOG:-$PWD/cast-demo-$(date +%Y%m%d-%H%M).log}"
 # шириной 80. Поэтому ширину и цвет передаём ему явно, пока знаем, что это терминал.
 CAST_ENV=()
 if [ -t 1 ]; then CAST_ENV=(COLUMNS="$(tput cols 2>/dev/null || echo 120)" FORCE_COLOR=1); fi
-exec > >(tee -a "$LOG") 2>&1
+# В журнал не пишем кадры индикатора cast (⠋ trivy — …): каждый кадр затирается
+# через \r и ESC[2K, остаётся только то, что после последнего затирания; последний
+# кадр перед остановкой индикатора стирается следующей строкой \r ESC[1A ESC[2K.
+LOG_FILTER='BEGIN { $| = 1 }
+s/^.*\r\e\[2K//; s/\e\[\?25[lh]//g;
+if (/^\r?\e\[1A\e\[2K\s*$/) { undef $prev; next }
+print $prev if defined $prev; $prev = $_;
+END { print $prev if defined $prev }'
+exec > >(tee >(perl -ne "$LOG_FILTER" >>"$LOG")) 2>&1
 
 say()  { printf '%s\n' "$*"; }
 die()  { printf '%sОшибка:%s %s\n' "$R" "$Z" "$*"; exit 2; }
@@ -137,7 +147,7 @@ if [ "$MODE" != medium ]; then
     add "Запущенный контейнер по ID: как он запущен (Docker Bench)" root "scan${US}$CONTAINER"
     add "Dockerfile: ошибки в инструкциях сборки" user "scan${US}Dockerfile"
     add "Папка проекта: уязвимые зависимости (requirements.txt)" user "scan${US}./myapp"
-    add "Docker-хост, то есть эта машина (Docker Bench, CIS)" root "scan${US}host"
+    add "Docker-хост, то есть текущая машина (Docker Bench, CIS)" root "scan${US}host"
     add "Какие движки установлены и что умеют" user "engines"
 fi
 if [ "$MODE" != basic ]; then
@@ -188,14 +198,17 @@ done
 # ------------------------------------------------------------ итог
 say ""
 say "${B}Итог${Z}"
-printf '%-4s %-62s %5s %7s\n' "№" "Команда" "Код" "Время"
+# printf считает ширину в байтах, а не в буквах: «№» и «Команда» съезжали. Дополняем сами.
+pad() { local s="$1" n="$2"; s="${s:0:$n}"; printf '%s%*s' "$s" $((n - ${#s})) ""; }
+printf '%s %s %s %s\n' "$(pad "№" 3)" "$(pad "Команда" 62)" "$(pad "Код" 3)" "Время"
 i=0
 for r in "${RESULTS[@]}"; do
     i=$((i + 1))
     cmd="${r%%|*}"; rest="${r#*|}"; rc="${rest%%|*}"; secs="${rest#*|}"
     color="$G"; [ "$rc" = 1 ] && color="$Y"; [ "$rc" -ge 2 ] && color="$R"
-    printf '%-4s %-62s %s%5s%s %6sс\n' "$i" "${cmd:0:62}" "$color" "$rc" "$Z" "$secs"
+    printf '%s %s %s%s%s %5s с\n' "$(pad "$i" 3)" "$(pad "$cmd" 62)" "$color" "$(pad "$rc" 3)" "$Z" "$secs"
 done
+[ -n "${DEMO_RESULTS:-}" ] && printf '%s\n' "${RESULTS[@]}" >"$DEMO_RESULTS"
 say ""
 say "${D}Коды: 0 — critical нет, 1 — есть critical, 2 — проверка не выполнена.${Z}"
 say "${D}Журнал: $LOG (с цветами; открыть: less -R $LOG)${Z}"

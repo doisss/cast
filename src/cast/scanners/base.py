@@ -82,3 +82,8 @@ class Scanner(ABC):
     def path(self) -> str | None:
         """Где лежит инструмент (для cast engines)."""
         return None
+
+    def other_copies(self) -> list[tuple[str, str | None]]:
+        """Другие установленные копии того же движка, которые cast НЕ запускает:
+        [(путь, версия)]. Для cast engines: сразу видно, если установок несколько."""
+        return []

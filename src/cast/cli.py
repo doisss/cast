@@ -63,7 +63,7 @@ CAST — Container Automated Security Testing
   /, ./rootfs             корневая ФС: папка, в которой есть etc/os-release
   ./chart                 Helm-чарт: папка, в которой есть Chart.yaml
   https://..., git@...    git-репозиторий (Trivy скачает его сам)
-  host                    Docker-хост, то есть эта машина
+  host                    Docker-хост, то есть текущая машина
   cluster                 кластер Kubernetes из текущего контекста kubeconfig
 
   Порядок определения: зарезервированное слово, адрес репозитория, путь,
@@ -139,7 +139,7 @@ CAST — Container Automated Security Testing
   cast scan main.tf                     ошибки конфигурации Terraform
   cast scan alpine.tar                  архив образа из docker save
   cast scan sbom.cdx.json               уязвимости по SBOM
-  cast scan /                           корневая ФС этой машины (долго, до 30 мин)
+  cast scan /                           корневая ФС текущей машины (долго, до 30 мин)
   cast scan https://github.com/aquasecurity/trivy-ci-test
   cast scan cluster                     кластер Kubernetes
   cast scan host -f html                проверка хоста с HTML-отчётом
@@ -267,6 +267,9 @@ def cmd_engines(console: Console) -> int:
                 f"[green]✓[/green] {engine.name:<13} {engine.version() or '?':<8} "
                 f"{engine.path() or ''}"
             )
+            for path, version in engine.other_copies():
+                console.print(f"    [yellow]также установлен:[/yellow] {path} {version or ''}  "
+                              "[dim](cast его не запускает: берёт первый найденный)[/dim]")
         else:
             console.print(f"[red]✗[/red] {engine.name:<13} [red]не установлен[/red] "
                           "(установка: sudo bash install.sh --local)")

@@ -14,7 +14,7 @@
   ., ./app, /srv/app, ~/x папка; если внутри есть etc/os-release (в т.ч. /) — корневая ФС,
                           если Chart.yaml — Helm-чарт
   https://..., git@...    git-репозиторий
-  host                    Docker-хост (эта машина)
+  host                    Docker-хост (текущая машина)
   cluster                 кластер Kubernetes (текущий контекст kubeconfig)
 
 Порядок: зарезервированное слово → URL → путь (./ ../ / ~) → существующий файл
@@ -98,7 +98,7 @@ class Target:
     @property
     def label(self) -> str:
         if self.kind == "host":
-            return "Docker-хост (эта машина)"
+            return "Docker-хост (текущая машина)"
         if self.kind == "container":
             return f"{self.container_name or self.value} (контейнер, образ {self.image_name or '?'})"
         if self.kind == "cluster":
@@ -310,7 +310,7 @@ def _auto(token: str) -> Target:
     if exists is False:
         target.image_missing = True
         target.notes.append(
-            f"образа «{token}» нет на этой машине — Trivy попробует скачать его из реестра "
+            f"образа «{token}» нет на текущей машине — Trivy попробует скачать его из реестра "
             "(Docker Hub). Если имя написано с ошибкой, скачивание не получится."
         )
     if path.is_dir():
@@ -373,7 +373,7 @@ def resolve_target(tokens: list[str]) -> Target:
             if _image_exists_locally(value) is False:
                 target.image_missing = True
                 target.notes.append(
-                    f"образа «{value}» нет на этой машине — Trivy попробует скачать его из реестра."
+                    f"образа «{value}» нет на текущей машине — Trivy попробует скачать его из реестра."
                 )
             return target
         if first == "container":

@@ -7,3 +7,4 @@ dist/
 report.json
 report.html
 .pytest_cache/
+cast-demo-*.log
