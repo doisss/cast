@@ -12,9 +12,9 @@
 #   bash realtests/run.sh -h           эта справка
 #
 # Остальные параметры передаются demo.sh как есть (--top N, --skip-repo, --pause).
-# Если кластера нет (не запускали setup.sh --cluster), его проверка пропускается.
+# Если кластера нет (setup.sh --no-cluster или его убрали), его проверка пропускается.
 #
-# Сначала один раз: bash realtests/setup.sh [--cluster]
+# Сначала один раз: bash realtests/setup.sh
 #
 # Почему проверяется только код 2: коды 0 и 1 зависят от базы уязвимостей
 # (завтра у alpine:3.19 может появиться critical), а код 2 значит, что проверка
@@ -40,7 +40,7 @@ else G=""; R=""; Y=""; B=""; Z=""; fi
 KUBECTL="$(command -v kubectl || echo "$BIN/kubectl")"
 if [[ " ${ARGS[*]-} " != *" --skip-cluster "* && " ${ARGS[*]-} " != *" basic "* ]]; then
     if ! [ -x "$KUBECTL" ] || ! "$KUBECTL" cluster-info >/dev/null 2>&1; then
-        printf '%s!%s кластер Kubernetes недоступен — его проверку пропускаю (поднять: bash realtests/setup.sh --cluster)\n' "$Y" "$Z"
+        printf '%s!%s кластер Kubernetes недоступен — его проверку пропускаю (поднять: bash realtests/setup.sh)\n' "$Y" "$Z"
         ARGS+=(--skip-cluster)
     fi
 fi

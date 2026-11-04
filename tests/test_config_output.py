@@ -58,9 +58,9 @@ def test_single_line_place_has_no_range():
     ("KSV-0001", "Set 'set containers[].securityContext.allowPrivilegeEscalation' to 'false'.",
      ["containers:", "  - securityContext:", "      allowPrivilegeEscalation: false"]),
     ("KSV-0020", "Set 'containers[].securityContext.runAsUser' to an integer > 10000.",
-     ["containers:", "  - securityContext:", "      runAsUser: <значение>"]),
+     ["containers:", "  - securityContext:", "      runAsUser: <ваше значение>"]),
     ("KSV-0110", "Set 'metadata.namespace' to a non-default namespace.",
-     ["metadata:", "  namespace: <значение>"]),
+     ["metadata:", "  namespace: <ваше значение>"]),
     # путь без кавычек, значение — до пути, drop в YAML — список
     ("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop.",
      ["containers:", "  - securityContext:", "      capabilities:", "        drop:", "          - ALL"]),

@@ -13,6 +13,13 @@ Trivy пишет совет обычной фразой, например
 Если путей в тексте несколько или нет совсем, подсказки нет (ничего не
 придумываем). У правил Terraform и CloudFormation путей в тексте нет, поэтому
 подсказка только для KSV.
+
+Чтобы было видно, куда это вписать, подсказка привязывается к файлу (hint_lines):
+- контейнер берётся из Message Trivy («Container 'web' of …») и пишется
+  строкой «- name: web», как в файле, а не прочерком перед первым ключом;
+- по строкам кода, которые прислал Trivy, отмечается, какие строки уже есть,
+  какие дописать и где поменять значение («← сейчас true»).
+Если Trivy строк не прислал, отметок нет: угадывать не из чего.
 """
 
 from __future__ import annotations
@@ -26,7 +33,11 @@ _VALUE = re.compile(r"\bto '?([A-Za-z_]+)'?\.?\s*$")
 _ADD_VALUE = re.compile(r"^Add '([A-Za-z_]+)' to ")      # «Add 'ALL' to …drop» — значение до пути
 # поля Kubernetes, которые в YAML — список: значение пишется пунктом «- ALL»
 _LIST_FIELDS = {"drop", "add"}
-UNKNOWN_VALUE = "<значение>"
+UNKNOWN_VALUE = "<ваше значение>"
+_CONTAINER = re.compile(r"\bcontainer ['\"]([^'\"]+)['\"]", re.I)
+
+# состояние строки подсказки относительно файла
+EXISTS, ADD, CHANGE, PLAIN = "exists", "add", "change", "plain"
 
 
 def _path_and_value(remediation: str) -> tuple[str, str] | None:
@@ -45,31 +56,108 @@ def _path_and_value(remediation: str) -> tuple[str, str] | None:
     return path, value
 
 
-def _yaml(path: str, value: str) -> list[str]:
-    lines: list[str] = []
-    indent, list_item = 0, False
+def _nodes(path: str, value: str, container: str | None) -> list[dict]:
+    """Путь как цепочка строк YAML: ключи, пункт списка «- name: web» и значение."""
+    nodes: list[dict] = []
     parts = path.split(".")
     for i, part in enumerate(parts):
         name = part.replace("[*]", "").replace("[]", "")
-        prefix = " " * indent + ("- " if list_item else "")
-        if list_item:
-            indent += 2
-            list_item = False
-        if i == len(parts) - 1 and name in _LIST_FIELDS:
-            lines.append(f"{prefix}{name}:")
-            lines.append(" " * (indent + 2) + f"- {value}")
-        elif i == len(parts) - 1:
-            lines.append(f"{prefix}{name}: {value}")
+        last = i == len(parts) - 1
+        if last and name in _LIST_FIELDS:
+            nodes.append({"kind": "key", "key": name})
+            nodes.append({"kind": "item", "value": value})
+        elif last:
+            nodes.append({"kind": "leaf", "key": name, "value": value})
         else:
-            lines.append(f"{prefix}{name}:")
+            nodes.append({"kind": "key", "key": name})
+            if part.endswith("]"):
+                nodes.append({"kind": "entry", "name": container})
+    return nodes
+
+
+def _render(nodes: list[dict]) -> list[str]:
+    lines: list[str] = []
+    indent, dash = 0, False
+    for node in nodes:
+        prefix = " " * indent + ("- " if dash else "")
+        if dash:
             indent += 2
-            list_item = part.endswith("]")
+            dash = False
+        kind = node["kind"]
+        if kind == "entry":
+            if node["name"]:
+                lines.append(f"{prefix}- name: {node['name']}")
+                indent += 2
+            else:
+                dash = True          # имени нет — прочерк перед следующим ключом, как раньше
+            continue
+        if kind == "item":
+            lines.append(f"{prefix}- {node['value']}")
+        elif kind == "leaf":
+            lines.append(f"{prefix}{node['key']}: {node['value']}")
+        else:
+            lines.append(f"{prefix}{node['key']}:")
+            indent += 2
+            continue
     return lines
 
 
-def yaml_hint(check_id: str, remediation: str | None) -> list[str]:
-    """Строки куска YAML или пустой список, если путь из текста однозначно не достаётся."""
+def _find(node: dict, content: str) -> re.Match | None:
+    kind = node["kind"]
+    if kind == "entry":
+        return re.match(rf"\s*-?\s*name\s*:\s*['\"]?{re.escape(node['name'])}['\"]?\s*$", content)
+    if kind == "item":
+        return re.match(rf"\s*-\s*['\"]?{re.escape(node['value'])}['\"]?\s*$", content)
+    return re.match(rf"\s*(?:-\s+)?{re.escape(node['key'])}\s*:\s*(.*?)\s*$", content)
+
+
+def _states(nodes: list[dict], code_lines: list[dict]) -> list[tuple[str, str | None]]:
+    """Для каждой строки: есть ли она в строках кода Trivy (по порядку сверху вниз).
+    Всё, что выше самой глубокой найденной строки, тоже есть: «- name: web» без
+    «containers:» над ним не бывает."""
+    contents = [line["content"] for line in code_lines]
+    found: dict[int, re.Match] = {}
+    pos = -1
+    for i, node in enumerate(nodes):
+        if node["kind"] == "entry" and not node["name"]:
+            continue
+        for j in range(pos + 1, len(contents)):
+            m = _find(node, contents[j])
+            if m:
+                found[i], pos = m, j
+                break
+    deepest = max(found, default=-1)
+    states: list[tuple[str, str | None]] = []
+    for i, node in enumerate(nodes):
+        if node["kind"] == "entry" and not node["name"]:
+            continue
+        if node["kind"] == "leaf" and i in found:
+            old = found[i].group(1).strip("'\"")
+            states.append((EXISTS, None) if old == node["value"] else (CHANGE, old))
+        elif i <= deepest:
+            states.append((EXISTS, None))
+        else:
+            states.append((ADD, None))
+    return states
+
+
+def hint_lines(check_id: str, remediation: str | None, message: str | None = None,
+               code_lines: list[dict] | None = None) -> list[tuple[str, str, str | None]]:
+    """Строки подсказки: (текст, состояние, прежнее значение для CHANGE).
+    Пустой список, если путь из текста однозначно не достаётся."""
     if not remediation or not check_id.upper().startswith("KSV"):
         return []
     found = _path_and_value(remediation)
-    return _yaml(*found) if found else []
+    if not found:
+        return []
+    m = _CONTAINER.search(message or "")
+    nodes = _nodes(*found, m.group(1) if m else None)
+    texts = _render(nodes)
+    if not code_lines:
+        return [(t, PLAIN, None) for t in texts]
+    return [(t, state, old) for t, (state, old) in zip(texts, _states(nodes, code_lines))]
+
+
+def yaml_hint(check_id: str, remediation: str | None, message: str | None = None) -> list[str]:
+    """Строки куска YAML или пустой список, если путь из текста однозначно не достаётся."""
+    return [text for text, _, _ in hint_lines(check_id, remediation, message)]

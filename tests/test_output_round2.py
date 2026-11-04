@@ -105,3 +105,51 @@ def test_engines_lists_other_copies_once(tmp_path, monkeypatch):
     (c / "trivy").chmod(0o755)
     monkeypatch.setenv("PATH", f"{a}:{b}:{c}")
     assert find_all_binaries("trivy") == [str(a / "trivy"), str(c / "trivy")]
+
+
+def test_whole_file_high_goes_before_line_medium():
+    """Вариант А (04.11): места сортируются только по серьёзности, «весь файл» — тоже."""
+    data = json.loads(DOCKERFILE)
+    misc = data["Results"][0]["Misconfigurations"]
+    misc[0]["Severity"] = "MEDIUM"
+    misc.append({"ID": "DS-0002", "Title": "Image user should not be 'root'", "Severity": "HIGH",
+                 "Message": "Specify at least 1 USER command in Dockerfile with non-root user as argument",
+                 "Resolution": "Add 'USER <non root user name>' line to the Dockerfile",
+                 "Status": "FAIL", "CauseMetadata": {}})
+    scanner = _FakeDockerfile()
+    scanner.scan_target = lambda target: scanner._parse(json.dumps(data))
+    out = _render(run_scan(Target("dockerfile", "Dockerfile"), scanners=[scanner]), 140)
+    assert out.index("весь файл") < out.index("Dockerfile:2")
+
+
+CODE_14_17 = [{"number": 14, "content": "        - name: web", "is_cause": True},
+              {"number": 15, "content": "          image: nginx:1.25", "is_cause": True},
+              {"number": 16, "content": "          securityContext:", "is_cause": True},
+              {"number": 17, "content": "            privileged: true", "is_cause": True}]
+MSG = "Container 'web' of Deployment 'web' should add 'ALL' to 'securityContext.capabilities.drop'"
+
+
+def test_hint_marks_existing_and_new_lines():
+    from cast.report.fix_hint import ADD, EXISTS, hint_lines
+    lines = hint_lines("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop.",
+                       MSG, CODE_14_17)
+    assert lines == [("containers:", EXISTS, None), ("  - name: web", EXISTS, None),
+                     ("    securityContext:", EXISTS, None), ("      capabilities:", ADD, None),
+                     ("        drop:", ADD, None), ("          - ALL", ADD, None)]
+
+
+def test_hint_shows_current_value_and_placeholder():
+    from cast.report.fix_hint import ADD, CHANGE, hint_lines
+    priv = hint_lines("KSV-0017", "Change 'containers[].securityContext.privileged' to 'false'.",
+                      MSG, CODE_14_17)
+    assert priv[-1] == ("      privileged: false", CHANGE, "true")
+    cpu = hint_lines("KSV-0011", "Set a limit value under 'containers[].resources.limits.cpu'.",
+                     MSG, CODE_14_17)
+    assert cpu[-1] == ("        cpu: <ваше значение>", ADD, None)   # значение cast не придумывает
+
+
+def test_hint_without_trivy_code_has_no_marks():
+    from cast.report.fix_hint import PLAIN, hint_lines
+    lines = hint_lines("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop.", MSG, [])
+    assert {state for _, state, _ in lines} == {PLAIN}
+    assert lines[1][0] == "  - name: web"                       # прочерк там же, где в файле
