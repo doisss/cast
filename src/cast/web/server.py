@@ -424,8 +424,7 @@ def serve(port: int = 8765, open_browser: bool = True, console=None,
         hint = _firewall_hint(port)
         if hint:
             say(hint)
-        say("Внимание: любой в этой сети может запускать проверки на этой машине. "
-            "Только для себя: cast web --local. Остановить: Ctrl+C")
+        say("Только с этой машины: cast web --local. Остановить: Ctrl+C")
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
