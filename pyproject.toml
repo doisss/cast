@@ -27,4 +27,4 @@ where = ["src"]
 
 # Шаблон HTML-отчёта должен попадать в установленный пакет (иначе --format html падает).
 [tool.setuptools.package-data]
-cast = ["report/templates/*.jinja", "web/templates/*.jinja"]
+cast = ["report/templates/*.jinja", "web/templates/*.jinja", "web/static/*.svg"]

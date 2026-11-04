@@ -167,3 +167,12 @@ def test_lan_addresses_skip_docker_vpn_and_loopback(monkeypatch):
     monkeypatch.setattr(web.subprocess, "run",
                         lambda *a, **k: type("R", (), {"stdout": out})())
     assert web._lan_addresses() == ["192.168.0.196"]
+
+
+def test_favicon_is_served_and_linked(app):
+    _, base = app
+    for path in ("/favicon.svg", "/favicon.ico"):
+        resp = urllib.request.urlopen(base + path)
+        assert resp.headers["Content-Type"] == "image/svg+xml"
+        assert resp.read().startswith(b"<svg")
+    assert '<link rel="icon"' in urllib.request.urlopen(base + "/").read().decode()

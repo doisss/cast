@@ -38,6 +38,7 @@ from cast.scanners import ALL_SCANNERS, ProgressUI
 from cast.targets import KIND_TITLES, Target, TargetError, resolve_target, run_docker
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
+_FAVICON = (Path(__file__).parent / "static" / "favicon.svg").read_bytes()
 _SEVERITIES = ("critical", "high", "medium", "low", "unknown")
 
 
@@ -296,6 +297,8 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
             parts = [p for p in urlparse(self.path).path.split("/") if p]
             if not parts:
                 return self._send(app.page_index())
+            if parts in (["favicon.svg"], ["favicon.ico"]):   # .ico браузер просит сам, без ссылки
+                return self._send(_FAVICON, "image/svg+xml")
             if parts[0] == "jobs" and len(parts) >= 2 and (job := self._job(parts[1])):
                 if len(parts) == 2:
                     return self._send(app.page_job(job))
