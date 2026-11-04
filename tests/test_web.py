@@ -87,7 +87,8 @@ def test_scan_runs_and_report_page_escapes_and_links(app):
     job = _wait(application, 1)
     assert job.state == "done"
     html = urllib.request.urlopen(base + "/jobs/1").read().decode()
-    assert "CVE-2024-0001" in html and "→ 3.0.9" in html
+    assert "CVE-2024-0001" in html and "3.0.9" in html and ">openssl<" in html
+    assert "Приор." not in html and "базовая критичность" not in html
     assert "уязвимость &lt;b&gt;" in html          # данные движка экранируются
     assert "исправления нет" in html               # у второй находки нет fixed_version
     status = json.loads(urllib.request.urlopen(base + "/jobs/1/status").read())
@@ -328,3 +329,62 @@ def test_login_logout_flow(auth_app):
     assert page.status == 200 and "Выйти" in page.read().decode()
     _req(base + "/logout", cookie=cookie)
     assert _req(base + "/", cookie=cookie).status == 303        # после выхода сессии нет
+
+
+
+def test_file_panel_lists_dirs_first_and_detects_kind(tmp_path):
+    (tmp_path / "b.txt").write_text("x")
+    (tmp_path / "Dockerfile").write_text("FROM alpine:3.19\n")
+    (tmp_path / "a-dir").mkdir()
+    (tmp_path / ".secret").write_text("x")
+    listing = web.list_dir(str(tmp_path))
+    assert [e["name"] for e in listing["entries"]] == ["a-dir", "b.txt", "Dockerfile"]
+    assert ".secret" in [e["name"] for e in web.list_dir(str(tmp_path), show_hidden=True)["entries"]]
+    assert web.what_is(str(tmp_path / "Dockerfile")) == {"ok": True, "text": "Dockerfile"}
+    assert web.what_is(str(tmp_path / "нет")) ["ok"] is False
+
+
+def test_file_api_needs_login(auth_app):
+    application, base, port = auth_app
+    assert _req(base + "/api/files?path=/").status == 401
+
+
+def test_config_page_groups_by_place_with_terminal_code():
+    from cast.pipeline import ScanResult, ScannerRun
+    from cast.targets import Target
+    code = [{"number": 16, "content": "          securityContext:", "is_cause": True},
+            {"number": 17, "content": "            privileged: true", "is_cause": True}]
+    f = Finding(source_tool="trivy", check_id="KSV-0017", title="Privileged", severity=Severity.HIGH,
+                remediation="Change 'containers[].securityContext.privileged' to 'false'.",
+                location="deploy.yaml:16-17", code_lines=code,
+                message="Container 'web' of Deployment 'web' should set 'securityContext.privileged' to false")
+    f.confirmed_by = ["trivy"]
+    result = ScanResult(image="deploy.yaml", findings=[f], target=Target("config", "deploy.yaml"),
+                        runs=[ScannerRun("trivy", "config", "ok", "", 1, 1.0)])
+    application = web.WebApp(web.JobStore(runner=_fake_runner))
+    job = web.Job(1, "deploy.yaml", None, state="done", target=result.target, result=result)
+    html = application.page_job(job)
+    assert "▌ deploy.yaml:16-17" in html and "Показать код везде" in html
+    assert '<span class="mk">┌</span>' in html and '<span class="mk">└</span>' in html
+    assert 'class="h-exists">    securityContext:' in html
+    assert "← сейчас true" in html
+
+
+def test_password_file_under_sudo_is_the_users(monkeypatch, tmp_path):
+    """sudo cast web берёт тот же файл, что и cast web без sudo, и оставляет его пользователю."""
+    import pwd
+    home = tmp_path / "home-d"
+    home.mkdir()
+    monkeypatch.delenv("XDG_CONFIG_HOME", raising=False)
+    monkeypatch.setattr(web_auth.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("SUDO_UID", "1000")
+    monkeypatch.setenv("SUDO_GID", "1000")
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: type("P", (), {"pw_dir": str(home)})())
+    assert web_auth.config_path() == home / ".config" / "cast" / "web.json"
+    chowned = []
+    monkeypatch.setattr(web_auth.os, "chown", lambda p, u, g: chowned.append((str(p), u, g)))
+    real_stat = type(home).stat
+    monkeypatch.setattr(type(home), "stat", lambda self, **kw: type("S", (), {
+        "st_uid": 0, "st_mode": real_stat(self).st_mode})())
+    web_auth.save("d", web_auth.hash_password("secret-pass"))
+    assert (str(home / ".config" / "cast" / "web.json"), 1000, 1000) in chowned

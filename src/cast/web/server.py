@@ -14,6 +14,7 @@ POST-запросы проверяются токеном: чужая стран
 from __future__ import annotations
 
 import json
+import os
 import sys
 from http.cookies import CookieError, SimpleCookie
 import socket
@@ -35,7 +36,9 @@ from cast import __version__
 from cast.context import ScanContext
 from cast.pipeline import EngineSelectionError, ScanResult, run_scan
 from cast.report import html_report, json_report
-from cast.report.console import _BENCH_MARKS, _BENCH_SECTIONS
+from cast.report.console import (_BENCH_MARKS, _BENCH_SECTIONS, _SHOW_WHERE, _group_by_place, _has_lines,
+                                 _merge_same, _message_differs)
+from cast.report.fix_hint import CHANGE, EXISTS, hint_lines
 from cast.report.sections import (STATUS_HELP, build_sections, container_image_note,
                                   sort_status_findings)
 from cast.scanners import ALL_SCANNERS, ProgressUI
@@ -193,6 +196,89 @@ def docker_suggestions() -> dict:
             "containers": containers, "images": images}
 
 
+def _code_lines(lines: list[dict]) -> list[dict]:
+    """Строки кода как в терминале: номер, отметка [ или ┌ │ └ у строк-причин."""
+    causes = [i for i, line in enumerate(lines) if line["is_cause"]]
+    out = []
+    for i, line in enumerate(lines):
+        if not line["is_cause"]:
+            mark = " "
+        elif len(causes) == 1:
+            mark = "["
+        else:
+            mark = "┌" if i == causes[0] else ("└" if i == causes[-1] else "│")
+        out.append({"number": line["number"], "mark": mark, "content": line["content"].rstrip(),
+                    "cause": line["is_cause"]})
+    return out
+
+
+def _config_places(findings) -> list[dict]:
+    """Ошибки конфигурации по месту в файле — как в терминале: код один раз, правила под ним."""
+    places = []
+    for place, group in _group_by_place(findings):
+        code = next((f.code_lines for f in group if f.code_lines), [])
+        rules = []
+        for f in sorted(group, key=lambda f: (-f.severity.rank, f.check_id)):
+            hint = [{"text": t, "state": "exists" if st == EXISTS else "new",
+                     "old": old if st == CHANGE else None}
+                    for t, st, old in hint_lines(f.check_id, f.remediation, f.message, f.code_lines or code)]
+            rules.append({"f": f, "message": f.message if _message_differs(f) else "", "hint": hint})
+        places.append({"place": place, "whole_file": not _has_lines(place) and place != "—",
+                       "counts": _sev_counts(group), "code": _code_lines(code), "rules": rules,
+                       "no_code": not code and _has_lines(place)})
+    return places
+
+
+def _kubeconfig() -> bool:
+    """Есть ли kubeconfig, с которым Trivy пойдёт в кластер."""
+    paths = os.environ.get("KUBECONFIG", "").split(os.pathsep) if os.environ.get("KUBECONFIG") else []
+    paths.append(str(Path.home() / ".kube" / "config"))
+    return any(p and Path(p).is_file() for p in paths)
+
+
+def list_dir(raw: str, show_hidden: bool = False) -> dict:
+    """Содержимое папки для панели файлов. Только имена и размеры: файлы не читаются."""
+    path = Path(raw or os.getcwd()).expanduser()
+    try:
+        path = path.resolve()
+        if not path.is_dir():
+            path = path.parent
+        entries = []
+        with os.scandir(path) as it:
+            for entry in it:
+                if entry.name.startswith(".") and not show_hidden:
+                    continue
+                try:
+                    is_dir = entry.is_dir()
+                    size = 0 if is_dir else entry.stat().st_size
+                except OSError:
+                    is_dir, size = False, 0
+                entries.append({"name": entry.name, "path": str(path / entry.name),
+                                "dir": is_dir, "size": size})
+    except PermissionError:
+        return {"path": str(path), "parent": str(path.parent), "entries": [],
+                "error": "нет прав читать эту папку"}
+    except OSError as exc:
+        return {"path": str(path), "parent": str(path.parent), "entries": [],
+                "error": exc.strerror or str(exc)}
+    entries.sort(key=lambda e: (not e["dir"], e["name"].lower()))
+    return {"path": str(path), "parent": str(path.parent), "entries": entries, "error": ""}
+
+
+def what_is(raw: str) -> dict:
+    """Что cast увидит в этом пути: та же логика, что у cast scan ПУТЬ."""
+    if not raw or not Path(raw).exists():
+        return {"ok": False, "text": "такого пути нет"}
+    try:
+        target = resolve_target([raw])
+    except TargetError as exc:
+        return {"ok": False, "text": str(exc)}
+    title = KIND_TITLES.get(target.kind, target.kind)
+    if getattr(target, "subtype", ""):
+        title += f" ({target.subtype})"
+    return {"ok": True, "text": title}
+
+
 def _sev_counts(findings) -> dict[str, int]:
     counts = dict.fromkeys(_SEVERITIES, 0)
     for f in findings:
@@ -246,7 +332,8 @@ class WebApp:
 
     def page_index(self) -> str:
         return self.render("index.html.jinja", engines=engines_info(),
-                           suggest=docker_suggestions(), jobs=self.store.recent())
+                           suggest=docker_suggestions(), jobs=self.store.recent(),
+                           cwd=os.getcwd(), is_root=os.geteuid() == 0, kube=_kubeconfig())
 
     def page_job(self, job: Job) -> str:
         sections, note = [], ""
@@ -259,8 +346,15 @@ class WebApp:
                     data["counts"] = _status_counts(sec.findings)
                 else:
                     data["counts"] = _sev_counts(sec.findings)
+                    if job.result.kind in ("config", "dockerfile"):
+                        data["places"] = _config_places(sec.findings)
+                    else:
+                        data["rows"] = [{"f": f, "packages": pk} for f, pk in _merge_same(sec.findings)]
+                        data["show_where"] = job.result.kind in _SHOW_WHERE
                 sections.append(data)
-        return self.render("job.html.jinja", job=job, result=job.result,
+        need_root = bool(job.result) and os.geteuid() != 0 and any(
+            r.name == "docker-bench" and r.status != "ok" for r in job.result.runs)
+        return self.render("job.html.jinja", job=job, result=job.result, need_root=need_root,
                            sections=sections, note=note, jobs=self.store.recent())
 
 
@@ -341,11 +435,17 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
                 gone = f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
                 return self._send("", status=303, extra={"Location": "/login", "Set-Cookie": gone})
             if not self._authed():
-                if parts[-1:] == ["status"]:     # опрос хода проверки из страницы — без перехода
+                if parts[-1:] == ["status"] or parts[:1] == ["api"]:   # запросы из страницы — без перехода
                     return self._send('{"error": "login"}', "application/json; charset=utf-8", 401)
                 return self._send("", status=303, extra={"Location": "/login"})
             if not parts:
                 return self._send(app.page_index())
+            if parts[0] == "api" and len(parts) == 2 and parts[1] in ("files", "what"):
+                query = parse_qs(urlparse(self.path).query)
+                path = query.get("path", [""])[0]
+                data = (list_dir(path, query.get("hidden", ["0"])[0] == "1") if parts[1] == "files"
+                        else what_is(path))
+                return self._send(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8")
             if parts[0] == "jobs" and len(parts) >= 2 and (job := self._job(parts[1])):
                 if len(parts) == 2:
                     return self._send(app.page_job(job))

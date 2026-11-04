@@ -1,45 +1,90 @@
 {% extends "base.html.jinja" %}
 {% block title %}cast — новая проверка{% endblock %}
 {% block body %}
-<div class="grid cols-2">
+<div class="layout">
+  <!-- файлы этой машины: выбрать и проверить, как в файловом менеджере -->
+  <div class="card files" id="files">
+    <div class="row"><h2 style="margin:0">Файлы</h2><span class="spacer"></span>
+      <label class="small muted"><input type="checkbox" id="f-hidden"> скрытые</label></div>
+    <div class="bar-path">
+      <button class="btn small-btn" type="button" id="f-up" title="На папку выше">↑</button>
+      <input type="text" id="f-path" value="{{ cwd }}" spellcheck="false" title="Путь: можно вписать и нажать Enter">
+    </div>
+    <ul id="f-list"></ul>
+    <div class="picked" id="f-picked">
+      <div class="muted">Щелчок — выбрать, двойной щелчок по папке — открыть,
+        правая кнопка — меню. Папка проверяется целиком (зависимости, Dockerfile и конфигурации внутри).</div>
+    </div>
+    <div class="row" style="margin-top:.5rem">
+      <button class="btn primary" type="button" id="f-scan" disabled>Сканировать</button>
+      <button class="btn" type="button" id="f-scan-dir" title="Проверить открытую папку целиком">Сканировать эту папку</button>
+    </div>
+  </div>
+
   <div>
     <form class="card" method="post" action="/jobs" id="scan-form">
       <h1>Что проверить?</h1>
-      <p class="muted small" style="margin-top:0">Как в консоли: <code>cast scan ЦЕЛЬ</code>. Что это за цель, cast поймёт сам.</p>
+      <p class="muted small" style="margin-top:0">Как в консоли: <code>cast scan ЦЕЛЬ</code>. Что это за цель, cast поймёт сам.
+        Пути без «/» в начале — от папки, где запущен <code>cast web</code>: <code>{{ cwd }}</code>.</p>
       <input type="hidden" name="token" value="{{ token }}">
       <div class="row" style="flex-wrap:nowrap">
         <input type="text" name="target" id="target" autofocus autocomplete="off"
-               placeholder="alpine:3.19, ./myapp, Dockerfile, host, https://github.com/…">
+               placeholder="alpine:3.19, /путь/к/Dockerfile, host, cluster, https://github.com/…">
         <button class="btn primary" type="submit">Проверить</button>
       </div>
 
-      <p class="small muted" style="margin:.9rem 0 .35rem">Примеры</p>
-      <div class="row">
-        <span class="chip" data-fill="host">host — текущая машина</span>
-        <span class="chip" data-fill="alpine:3.19">alpine:3.19</span>
-        <span class="chip" data-fill="./myapp">./myapp</span>
-        <span class="chip" data-fill="Dockerfile">Dockerfile</span>
-        <span class="chip" data-fill="deploy.yaml">deploy.yaml</span>
-        <span class="chip" data-fill="cluster">cluster</span>
+      <div class="cat">
+        <h3>Эта машина</h3>
+        <div class="row">
+          <span class="chip" data-fill="host">host — настройки Docker (Docker Bench)</span>
+          <span class="chip" data-fill="/">/ — вся файловая система</span>
+        </div>
+        {% if not is_root %}<p class="hint-line">host проверяется от root: запустите веб через <code>sudo cast web</code>.</p>{% endif %}
+        <p class="hint-line">«/» — все пакеты и файлы машины через Trivy rootfs: долго, до 30 минут.</p>
       </div>
 
-      {% if suggest.containers %}
-      <p class="small muted" style="margin:.9rem 0 .35rem">Запущенные контейнеры</p>
-      <div class="row">
-        {% for c in suggest.containers %}
-        <span class="chip" data-fill="container {{ c.name }}" title="образ {{ c.image }}">▣ {{ c.name }}</span>
-        {% endfor %}
+      <div class="cat">
+        <h3>Docker</h3>
+        {% if suggest.containers %}
+        <p class="hint-line" style="margin:0 0 .3rem">Запущенные контейнеры — как они запущены (Docker Bench):</p>
+        <div class="row">
+          {% for c in suggest.containers %}
+          <span class="chip" data-fill="container {{ c.name }}" title="образ {{ c.image }}">▣ {{ c.name }}</span>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% if suggest.images %}
+        <p class="hint-line" style="margin:.5rem 0 .3rem">Образы на этой машине — уязвимые пакеты (Trivy):</p>
+        <div class="row">
+          {% for i in suggest.images %}<span class="chip" data-fill="{{ i }}">{{ i }}</span>{% endfor %}
+        </div>
+        {% endif %}
+        {% if not suggest.docker %}
+        <p class="hint-line">Docker не отвечает этому пользователю, поэтому списков контейнеров и образов нет.
+          {% if not is_root %}Запустите веб через <code>sudo cast web</code> или впишите имя образа сами, например
+          <span class="chip" data-fill="alpine:3.19">alpine:3.19</span>{% endif %}</p>
+        {% endif %}
       </div>
-      {% endif %}
-      {% if suggest.images %}
-      <p class="small muted" style="margin:.9rem 0 .35rem">Образы на этой машине</p>
-      <div class="row">
-        {% for i in suggest.images %}<span class="chip" data-fill="{{ i }}">{{ i }}</span>{% endfor %}
+
+      <div class="cat">
+        <h3>Kubernetes</h3>
+        <div class="row"><span class="chip" data-fill="cluster">cluster — кластер из kubeconfig</span></div>
+        <p class="hint-line">{% if kube %}kubeconfig найден.{% else %}kubeconfig не найден (~/.kube/config) — проверка кластера не запустится.{% endif %}
+          Манифесты, Helm-чарты — файлами слева.</p>
       </div>
-      {% endif %}
-      {% if not suggest.docker %}
-      <p class="small muted" style="margin-top:.9rem">Docker не отвечает: списка контейнеров и образов не будет.</p>
-      {% endif %}
+
+      <div class="cat">
+        <h3>Файлы и папки</h3>
+        <p class="hint-line" style="margin:0">Выберите слева: Dockerfile, конфигурация (Kubernetes, Terraform, Helm, docker-compose,
+          CloudFormation), папка проекта, архив образа (<code>docker save</code>), SBOM, образ диска ВМ,
+          распакованная ОС (корневая ФС). Что это за файл, cast покажет под списком.</p>
+      </div>
+
+      <div class="cat">
+        <h3>Git-репозиторий</h3>
+        <p class="hint-line" style="margin:0">Вставьте ссылку в строку выше, например
+          <span class="chip" data-fill="https://github.com/aquasecurity/trivy-ci-test">https://github.com/aquasecurity/trivy-ci-test</span></p>
+      </div>
 
       <details style="margin-top:1rem">
         <summary>Дополнительно</summary>
@@ -54,7 +99,9 @@
         <input type="text" name="requirements" placeholder="./myapp/requirements.txt">
       </details>
     </form>
+  </div>
 
+  <div class="side-right">
     {% if jobs %}
     <div class="card">
       <h2>Проверки в этом запуске</h2>
@@ -63,9 +110,6 @@
       </div>
     </div>
     {% endif %}
-  </div>
-
-  <div>
     <div class="card">
       <h2>Движки</h2>
       {% for e in engines %}
@@ -81,16 +125,90 @@
     </div>
     <div class="card small muted">
       cast запускает Trivy и Docker Bench и показывает то, что нашли они, ничего не добавляя от себя.
-      Проверки идут по одной; пути указываются на этой машине.
+      Проверки идут по одной; файлы и пути — на машине, где запущен cast web.
     </div>
   </div>
 </div>
+<div class="ctx hidden" id="ctx"></div>
 {% endblock %}
 {% block scripts %}
 <script>
+  const form = document.getElementById("scan-form");
+  const input = document.getElementById("target");
+  const scan = value => { input.value = value; form.submit(); };
   document.querySelectorAll("[data-fill]").forEach(el => el.addEventListener("click", () => {
-    const input = document.getElementById("target");
     input.value = el.dataset.fill; input.focus();
   }));
+
+  // ---------------------------------------------------------------- файлы
+  const list = document.getElementById("f-list"), pathBox = document.getElementById("f-path");
+  const picked = document.getElementById("f-picked"), scanBtn = document.getElementById("f-scan");
+  const hidden = document.getElementById("f-hidden"), ctx = document.getElementById("ctx");
+  let current = pathBox.value, parent = current, selected = null;
+  const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
+  const size = n => n < 1024 ? n + " Б" : n < 1048576 ? (n / 1024).toFixed(0) + " КБ" : (n / 1048576).toFixed(1) + " МБ";
+
+  function open(path) {
+    fetch("/api/files?path=" + encodeURIComponent(path) + "&hidden=" + (hidden.checked ? 1 : 0))
+      .then(r => r.json()).then(d => {
+        current = d.path; parent = d.parent; pathBox.value = d.path; select(null);
+        try { localStorage.setItem("cast-files", d.path); } catch (e) {}
+        list.innerHTML = d.error ? `<li class="muted">${esc(d.error)}</li>` :
+          (d.entries.length ? "" : `<li class="muted">папка пуста</li>`) +
+          d.entries.map(e => `<li data-path="${esc(e.path)}" data-dir="${e.dir ? 1 : 0}">
+            <span>${e.dir ? "📁" : "📄"}</span><span class="nm" title="${esc(e.name)}">${esc(e.name)}</span>
+            <span class="sz">${e.dir ? "" : size(e.size)}</span></li>`).join("");
+      });
+  }
+  function select(li) {
+    list.querySelectorAll("li.sel").forEach(x => x.classList.remove("sel"));
+    selected = li ? li.dataset.path : null;
+    scanBtn.disabled = !selected;
+    if (!li) return;
+    li.classList.add("sel");
+    picked.innerHTML = `<div class="mono small">${esc(selected)}</div><div class="muted">определяю…</div>`;
+    const asked = selected;
+    fetch("/api/what?path=" + encodeURIComponent(asked)).then(r => r.json()).then(w => {
+      if (asked !== selected) return;
+      picked.innerHTML = `<div class="mono small">${esc(asked)}</div>` +
+        (w.ok ? `<div>cast проверит как: <strong>${esc(w.text)}</strong></div>`
+              : `<div style="color:var(--crit)">${esc(w.text)}</div>`);
+      scanBtn.disabled = !w.ok;
+    });
+  }
+  list.addEventListener("click", e => { const li = e.target.closest("li[data-path]"); if (li) select(li); });
+  list.addEventListener("dblclick", e => {
+    const li = e.target.closest("li[data-path]"); if (!li) return;
+    li.dataset.dir === "1" ? open(li.dataset.path) : scan(li.dataset.path);
+  });
+  list.addEventListener("contextmenu", e => {
+    const li = e.target.closest("li[data-path]"); if (!li) return;
+    e.preventDefault(); select(li);
+    const p = li.dataset.path, isDir = li.dataset.dir === "1";
+    ctx.innerHTML = `<button class="primary" data-act="scan">Сканировать</button>` +
+      (isDir ? `<button data-act="open">Открыть</button>` : "") +
+      `<button data-act="fill">Вставить в строку «Что проверить?»</button>` +
+      `<button data-act="copy">Копировать путь</button>`;
+    ctx.style.left = Math.min(e.clientX, innerWidth - 220) + "px";
+    ctx.style.top = Math.min(e.clientY, innerHeight - 160) + "px";
+    ctx.classList.remove("hidden");
+    ctx.onclick = ev => {
+      const act = ev.target.dataset.act; ctx.classList.add("hidden");
+      if (act === "scan") scan(p);
+      if (act === "open") open(p);
+      if (act === "fill") { input.value = p; input.focus(); }
+      if (act === "copy" && navigator.clipboard) navigator.clipboard.writeText(p);
+    };
+  });
+  document.addEventListener("click", e => { if (!ctx.contains(e.target)) ctx.classList.add("hidden"); });
+  document.addEventListener("keydown", e => { if (e.key === "Escape") ctx.classList.add("hidden"); });
+  scanBtn.addEventListener("click", () => selected && scan(selected));
+  document.getElementById("f-scan-dir").addEventListener("click", () => scan(current));
+  document.getElementById("f-up").addEventListener("click", () => open(parent));
+  pathBox.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); open(pathBox.value); } });
+  hidden.addEventListener("change", () => open(current));
+  let start = current;
+  try { start = localStorage.getItem("cast-files") || current; } catch (e) {}
+  open(start);
 </script>
 {% endblock %}

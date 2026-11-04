@@ -2,7 +2,8 @@
 Вход в веб-интерфейс по логину и паролю.
 
 Пароль спрашивается в терминале при первом `cast web` и сохраняется в
-~/.config/cast/web.json (права 600). Сохраняется не сам пароль, а его хэш
+~/.config/cast/web.json (права 600). Под sudo — в том же файле того, кто запустил
+sudo: пароль один, с sudo и без. Сохраняется не сам пароль, а его хэш
 scrypt с солью: по файлу пароль не восстановить, можно только проверить.
 Сменить логин и пароль: cast web --reset-password.
 
@@ -28,9 +29,27 @@ _N, _R, _P = 2 ** 14, 8, 1        # параметры scrypt: ~16 МБ памя
 MAX_FAILS, BLOCK_SECONDS = 5, 60
 
 
+def _sudo_owner() -> tuple[int, int] | None:
+    """Под sudo — кто запустил (uid, gid): пароль у него один и тот же, с sudo и без."""
+    if os.geteuid() != 0 or not os.environ.get("SUDO_UID"):
+        return None
+    try:
+        return int(os.environ["SUDO_UID"]), int(os.environ.get("SUDO_GID", os.environ["SUDO_UID"]))
+    except ValueError:
+        return None
+
+
 def config_path() -> Path:
-    base = os.environ.get("XDG_CONFIG_HOME") or str(Path.home() / ".config")
-    return Path(base) / "cast" / "web.json"
+    if os.environ.get("XDG_CONFIG_HOME"):
+        return Path(os.environ["XDG_CONFIG_HOME"]) / "cast" / "web.json"
+    owner = _sudo_owner()
+    if owner:
+        import pwd
+        try:
+            return Path(pwd.getpwuid(owner[0]).pw_dir) / ".config" / "cast" / "web.json"
+        except KeyError:
+            pass
+    return Path.home() / ".config" / "cast" / "web.json"
 
 
 def hash_password(password: str) -> str:
@@ -71,12 +90,17 @@ def save(login: str, password_hash: str, path: Path | None = None) -> Path:
     with os.fdopen(fd, "w", encoding="utf-8") as fh:
         json.dump({"login": login, "password": password_hash}, fh, ensure_ascii=False)
     os.chmod(path, 0o600)
+    owner = _sudo_owner()
+    if owner:      # создано под sudo — файл и папка всё равно принадлежат пользователю
+        for item in (path.parent.parent, path.parent, path):
+            if item.exists() and item.stat().st_uid == 0 and item != Path.home():
+                os.chown(item, *owner)
     return path
 
 
 def ask(say, read=input, read_secret=getpass.getpass) -> tuple[str, str]:
     """Спросить логин и пароль в терминале. Пустой пароль — придумать случайный."""
-    default = getpass.getuser()
+    default = os.environ.get("SUDO_USER") or getpass.getuser()
     login = read(f"Логин для входа в веб [{default}]: ").strip() or default
     while True:
         password = read_secret("Пароль (Enter — придумать случайный): ")

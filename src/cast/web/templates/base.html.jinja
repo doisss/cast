@@ -38,7 +38,8 @@
   header.top .logo span { color: var(--accent); }
   header.top .ver { color: var(--muted); font-size: .8rem; }
   header.top nav { margin-left: auto; display: flex; gap: 1rem; }
-  main { max-width: 1180px; margin: 0 auto; padding: 1.5rem; }
+  main { max-width: 1900px; margin: 0 auto; padding: 1.2rem 1.5rem; }
+  main.narrow { max-width: 1180px; }
   h1 { font-size: 1.45rem; margin: 0 0 .3rem; }
   h2 { font-size: 1.12rem; margin: 0; }
   .muted { color: var(--muted); }
@@ -61,6 +62,7 @@
   input[type=password]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .login { max-width: 380px; margin: 3rem auto; }
   .login form { display: flex; flex-direction: column; gap: .8rem; }
+  .login .btn { justify-content: center; }
   .login label { display: flex; flex-direction: column; gap: .25rem; font-weight: 600; font-size: .9rem; }
   .login-error { color: var(--crit); background: var(--crit-soft); border-radius: 6px; padding: .4rem .6rem; }
   input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
@@ -113,6 +115,42 @@
   ul.details { margin: .3rem 0 0; padding-left: 1.1rem; color: var(--muted); font-size: .84rem; }
   tr.is-pass td { color: var(--muted); }
   .hidden { display: none !important; }
+  .nowrap { white-space: nowrap; }
+  .btn:disabled { opacity: .45; cursor: not-allowed; filter: none; }
+  .small-btn { padding: .25rem .6rem; font-size: .82rem; }
+  /* ошибки конфигурации: место в файле, код как в терминале, правила */
+  .place { margin-top: 1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
+  .place-head { display: flex; align-items: center; gap: .5rem; flex-wrap: wrap; font-weight: 700; color: var(--info); }
+  pre.term { background: #0d1117; color: #e6edf3; border-radius: 8px; padding: .6rem .8rem; margin: .5rem 0;
+             font: .82rem/1.45 "JetBrains Mono", ui-monospace, Menlo, monospace; overflow-x: auto; }
+  pre.term .ln, pre.term .dimmed { color: #7d8590; }
+  pre.term .mk { color: #e3b341; }
+  pre.hint { background: transparent; margin: .35rem 0 0; padding: 0;
+             font: .8rem/1.45 "JetBrains Mono", ui-monospace, Menlo, monospace; white-space: pre; overflow-x: auto; }
+  pre.hint .h-exists { color: var(--muted); } pre.hint .h-new { color: var(--ok); } pre.hint .h-old { color: var(--med); }
+  /* главная: файлы слева, что проверить в центре, движки справа */
+  .layout { display: grid; gap: 1rem; grid-template-columns: minmax(260px, 340px) minmax(0, 1fr) minmax(260px, 360px); align-items: start; }
+  @media (max-width: 1200px) { .layout { grid-template-columns: minmax(240px, 320px) minmax(0, 1fr); } .layout > .side-right { grid-column: 1 / -1; } }
+  @media (max-width: 800px) { .layout { grid-template-columns: 1fr; } }
+  .files { position: sticky; top: 1rem; display: flex; flex-direction: column; max-height: calc(100vh - 6rem); }
+  .files .bar-path { display: flex; gap: .3rem; align-items: center; margin: .4rem 0; }
+  .files .bar-path input { font-size: .8rem; padding: .35rem .5rem; }
+  .files ul { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; border: 1px solid var(--line); border-radius: 8px; }
+  .files li { display: flex; gap: .45rem; align-items: center; padding: .3rem .55rem; cursor: default; user-select: none;
+              font-size: .86rem; border-bottom: 1px solid var(--line); }
+  .files li:last-child { border-bottom: 0; }
+  .files li:hover { background: var(--panel-2); }
+  .files li.sel { background: var(--accent-soft); }
+  .files li .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .files li .sz { color: var(--muted); font-size: .74rem; }
+  .files .picked { margin-top: .6rem; font-size: .84rem; }
+  .ctx { position: fixed; z-index: 10; background: var(--panel); border: 1px solid var(--line); border-radius: 8px;
+         box-shadow: 0 6px 24px rgba(0,0,0,.35); padding: .25rem; min-width: 200px; }
+  .ctx button { display: block; width: 100%; text-align: left; background: none; border: 0; color: var(--text);
+                font: inherit; font-size: .88rem; padding: .4rem .7rem; border-radius: 6px; cursor: pointer; }
+  .ctx button:hover { background: var(--panel-2); } .ctx button.primary { color: var(--accent); font-weight: 600; }
+  .cat { margin-top: 1rem; } .cat h3 { margin: 0 0 .35rem; font-size: .92rem; }
+  .cat .hint-line { color: var(--muted); font-size: .8rem; margin: .25rem 0 0; }
 </style>
 </head>
 <body>
@@ -121,7 +159,7 @@
   <span class="ver">веб-интерфейс · v{{ version }}</span>
   {% if not login_page %}<nav><a href="/">Новая проверка</a>{% if auth_on %}<a href="/logout">Выйти</a>{% endif %}</nav>{% endif %}
 </header>
-<main>
+<main{% if narrow %} class="narrow"{% endif %}>
 {% block body %}{% endblock %}
 </main>
 {% block scripts %}{% endblock %}
