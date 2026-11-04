@@ -6,7 +6,7 @@ pipeline.run_scan(), что и консоль. Логика проверки н�
 Без новых зависимостей: встроенный http.server и Jinja2 (она уже нужна HTML-отчёту).
 По умолчанию открыт в сеть: зайти можно и с этой машины, и с другой (например, с
 хоста на ВМ); --local — только с этой машины. Запросы принимаются только по
-адресам и имени этой машины, а
+адресам и имени этой машины, вход — по логину и паролю (cast/web/auth.py), а
 POST-запросы проверяются токеном: чужая страница в браузере не может запустить
 проверку на этой машине.
 """
@@ -14,6 +14,8 @@ POST-запросы проверяются токеном: чужая стран
 from __future__ import annotations
 
 import json
+import sys
+from http.cookies import CookieError, SimpleCookie
 import socket
 import queue
 import secrets
@@ -38,6 +40,7 @@ from cast.report.sections import (STATUS_HELP, build_sections, container_image_n
                                   sort_status_findings)
 from cast.scanners import ALL_SCANNERS, ProgressUI
 from cast.targets import KIND_TITLES, Target, TargetError, resolve_target, run_docker
+from cast.web import auth as web_auth
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _FAVICON = (Path(__file__).parent / "static" / "favicon.svg").read_bytes()
@@ -228,14 +231,15 @@ def _marks(finding) -> list[str]:
 
 
 class WebApp:
-    def __init__(self, store: JobStore | None = None):
+    def __init__(self, store: JobStore | None = None, auth: web_auth.Auth | None = None):
         self.store = store or JobStore()
+        self.auth = auth                 # None — без входа (только в тестах)
         self.token = secrets.token_urlsafe(24)
         self.env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR),
                                autoescape=select_autoescape(["html", "jinja"]))
         self.env.globals.update(version=__version__, token=self.token,
                                 kind_titles=KIND_TITLES, status_help=STATUS_HELP,
-                                marks=_marks)
+                                marks=_marks, auth_on=auth is not None)
 
     def render(self, name: str, **ctx) -> str:
         return self.env.get_template(name).render(**ctx)
@@ -264,6 +268,7 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
     """addresses — адреса этой машины, по которым к ней можно обращаться
     (кроме 127.0.0.1 и localhost, они разрешены всегда)."""
     allowed_hosts = {f"{a}:{port}" for a in ["127.0.0.1", "localhost", *(addresses or [])]}
+    cookie_name = f"cast_session_{port}"   # cookie не различают порты: у двух cast web — свои
 
     class Handler(BaseHTTPRequestHandler):
         server_version = f"cast-web/{__version__}"
@@ -290,6 +295,35 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
             self._send("Неверный адрес", "text/plain; charset=utf-8", 403)
             return False
 
+        def _session(self) -> str | None:
+            try:
+                morsel = SimpleCookie(self.headers.get("Cookie", "")).get(cookie_name)
+            except CookieError:
+                return None
+            return morsel.value if morsel else None
+
+        def _authed(self) -> bool:
+            return app.auth is None or app.auth.valid(self._session())
+
+        def _login_page(self, error: str = "", status: int = 200, login: str = ""):
+            return self._send(app.render("login.html.jinja", error=error, login=login, login_page=True),
+                              status=status)
+
+        def _login(self, form: dict) -> None:
+            addr = self.client_address[0]
+            wait = app.auth.blocked(addr)
+            if wait:
+                return self._login_page(f"Слишком много неверных попыток. Подождите {wait} с.", 429)
+            login = form.get("login", [""])[0]
+            session = app.auth.check(addr, login, form.get("password", [""])[0])
+            if not session:
+                wait = app.auth.blocked(addr)
+                return self._login_page(
+                    f"Слишком много неверных попыток. Подождите {wait} с." if wait
+                    else "Неверный логин или пароль", 429 if wait else 401, login)
+            cookie = f"{cookie_name}={session}; Path=/; HttpOnly; SameSite=Strict"
+            return self._send("", status=303, extra={"Location": "/", "Set-Cookie": cookie})
+
         def _job(self, raw: str) -> Job | None:
             return app.store.jobs.get(int(raw)) if raw.isdigit() else None
 
@@ -297,10 +331,21 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
             if not self._allowed():
                 return
             parts = [p for p in urlparse(self.path).path.split("/") if p]
-            if not parts:
-                return self._send(app.page_index())
             if parts in (["favicon.svg"], ["favicon.ico"]):   # .ico браузер просит сам, без ссылки
                 return self._send(_FAVICON, "image/svg+xml")
+            if parts == ["login"]:
+                return self._login_page() if app.auth else self._send("", status=303, extra={"Location": "/"})
+            if parts == ["logout"]:
+                if app.auth:
+                    app.auth.logout(self._session())
+                gone = f"{cookie_name}=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict"
+                return self._send("", status=303, extra={"Location": "/login", "Set-Cookie": gone})
+            if not self._authed():
+                if parts[-1:] == ["status"]:     # опрос хода проверки из страницы — без перехода
+                    return self._send('{"error": "login"}', "application/json; charset=utf-8", 401)
+                return self._send("", status=303, extra={"Location": "/login"})
+            if not parts:
+                return self._send(app.page_index())
             if parts[0] == "jobs" and len(parts) >= 2 and (job := self._job(parts[1])):
                 if len(parts) == 2:
                     return self._send(app.page_job(job))
@@ -321,13 +366,20 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
         def do_POST(self):
             if not self._allowed():
                 return
-            if urlparse(self.path).path != "/jobs":
+            path = urlparse(self.path).path
+            if path not in ("/jobs", "/login"):
                 return self._send(app.render("missing.html.jinja"), status=404)
             length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
             sent = form.get("token", [""])[0].encode("utf-8")
             if not secrets.compare_digest(sent, app.token.encode("utf-8")):
                 return self._send("Устаревшая страница, обновите её", "text/plain; charset=utf-8", 403)
+            if path == "/login":
+                if not app.auth:
+                    return self._send("", status=303, extra={"Location": "/"})
+                return self._login(form)
+            if not self._authed():
+                return self._send("", status=303, extra={"Location": "/login"})
             query = form.get("target", [""])[0].strip()
             if not query:
                 return self._send("", status=303, extra={"Location": "/"})
@@ -388,14 +440,35 @@ def _firewall_hint(port: int) -> str | None:
 PORT_TRIES = 10   # занят порт — пробуем следующие
 
 
+def _load_auth(say, reset: bool, path=None) -> web_auth.Auth | None:
+    """Логин и пароль из ~/.config/cast/web.json; при первом запуске — спросить и сохранить."""
+    found = None if reset else web_auth.load(path)
+    if found:
+        return web_auth.Auth(*found)
+    if not sys.stdin.isatty():
+        say("Ошибка: для входа в веб нужен логин и пароль, а спросить их негде "
+            "(cast web запущен не из терминала). Запустите cast web один раз в терминале.")
+        return None
+    say("Вход в веб — по логину и паролю. Задайте их (спрашиваю один раз, "
+        "сменить: cast web --reset-password).")
+    login, password = web_auth.ask(say)
+    saved = web_auth.save(login, web_auth.hash_password(password), path)
+    say(f"Сохранено в {saved} (пароль — в виде хэша, не открытым текстом)")
+    return web_auth.Auth(*web_auth.load(path))
+
+
 def serve(port: int = 8765, open_browser: bool = True, console=None,
-          local: bool = False, port_fixed: bool = False) -> int:
+          local: bool = False, port_fixed: bool = False, reset_password: bool = False,
+          auth_path=None) -> int:
     """local — слушать только 127.0.0.1; иначе все адреса машины (0.0.0.0).
     port_fixed — порт задан явно (--port): если занят, не подбирать другой."""
     say = console.print if console else print
     host = "127.0.0.1" if local else "0.0.0.0"
+    auth = _load_auth(say, reset_password, auth_path)
+    if auth is None:
+        return 2
     addresses = [] if local else _lan_addresses()
-    app = WebApp()
+    app = WebApp(auth=auth)
     httpd, error = None, None
     for candidate in [port] if port_fixed else range(port, port + PORT_TRIES):
         try:
@@ -410,10 +483,10 @@ def serve(port: int = 8765, open_browser: bool = True, console=None,
             "Укажите другой: cast web --port 9000")
         return 2
     if httpd.server_address[1] != port:
-        say(f"Порт {port} занят (наверное, cast web уже запущен) — беру {httpd.server_address[1]}")
+        say(f"Порт {port} занят — беру {httpd.server_address[1]}")
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/"
-    say(f"Веб-интерфейс cast: {url}")
+    say(f"Веб-интерфейс cast: {url}  (логин: {auth.login})")
     if local:
         say("Доступен только с этой машины (--local). Остановить: Ctrl+C")
     else:

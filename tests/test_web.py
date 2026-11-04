@@ -126,7 +126,9 @@ def test_unknown_page_is_404(app):
     assert exc.value.code == 404
 
 
-def test_cli_web_reports_busy_port(capsys):
+def test_cli_web_reports_busy_port(capsys, monkeypatch, tmp_path):
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    web.web_auth.save("d", web.web_auth.hash_password("secret-pass"))
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
         s.listen()
@@ -178,9 +180,11 @@ def test_favicon_is_served_and_linked(app):
     assert '<link rel="icon"' in urllib.request.urlopen(base + "/").read().decode()
 
 
-def _fake_serve(monkeypatch):
+def _fake_serve(monkeypatch, tmp_path):
     """serve() без вечного цикла: запоминаем, на каком адресе он слушал бы."""
     bound = {}
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    web.web_auth.save("d", web.web_auth.hash_password("secret-pass"))
 
     class FakeServer:
         def __init__(self, address, handler):
@@ -201,23 +205,23 @@ def _fake_serve(monkeypatch):
     return bound
 
 
-def test_web_is_open_to_lan_by_default(monkeypatch):
-    bound = _fake_serve(monkeypatch)
+def test_web_is_open_to_lan_by_default(monkeypatch, tmp_path):
+    bound = _fake_serve(monkeypatch, tmp_path)
     said = []
     assert web.serve(open_browser=False, console=type("C", (), {"print": staticmethod(said.append)})()) == 0
     assert bound["address"] == ("0.0.0.0", 8765)
     assert any("http://192.168.0.196:8765/" in line for line in said)
 
 
-def test_web_local_listens_on_loopback_only(monkeypatch):
-    bound = _fake_serve(monkeypatch)
+def test_web_local_listens_on_loopback_only(monkeypatch, tmp_path):
+    bound = _fake_serve(monkeypatch, tmp_path)
     web.serve(open_browser=False, console=type("C", (), {"print": staticmethod(lambda *_: None)})(),
               local=True)
     assert bound["address"] == ("127.0.0.1", 8765)
 
 
-def test_busy_port_takes_next_unless_given(monkeypatch):
-    bound = _fake_serve(monkeypatch)
+def test_busy_port_takes_next_unless_given(monkeypatch, tmp_path):
+    bound = _fake_serve(monkeypatch, tmp_path)
     bound["busy"] = {8765}
     quiet = type("C", (), {"print": staticmethod(lambda *_: None)})()
     assert web.serve(open_browser=False, console=quiet) == 0
@@ -225,3 +229,102 @@ def test_busy_port_takes_next_unless_given(monkeypatch):
     del bound["address"]
     assert web.serve(8765, open_browser=False, console=quiet, port_fixed=True) == 2
     assert "address" not in bound
+
+
+
+# ------------------------------------------------------------------ вход по паролю
+from cast.web import auth as web_auth  # noqa: E402
+
+
+def test_password_is_stored_as_hash_with_private_rights(tmp_path):
+    path = web_auth.save("d", web_auth.hash_password("secret-pass"), tmp_path / "cast" / "web.json")
+    text = path.read_text()
+    assert "secret-pass" not in text and "scrypt$" in text
+    assert oct(path.stat().st_mode & 0o777) == "0o600"
+    login, stored = web_auth.load(path)
+    assert login == "d" and web_auth.verify_password("secret-pass", stored)
+    assert not web_auth.verify_password("wrong", stored)
+
+
+def test_login_blocked_after_five_failures():
+    now = [0.0]
+    a = web_auth.Auth("d", web_auth.hash_password("secret-pass"), clock=lambda: now[0])
+    for _ in range(5):
+        assert a.check("10.0.0.5", "d", "wrong") is None
+    assert a.blocked("10.0.0.5") == 60
+    assert a.check("10.0.0.5", "d", "secret-pass") is None      # верный пароль тоже не пускаем
+    assert a.blocked("10.0.0.6") == 0                            # другой адрес не затронут
+    now[0] = 61
+    assert a.valid(a.check("10.0.0.5", "d", "secret-pass"))
+
+
+def test_first_run_asks_and_saves(monkeypatch, tmp_path):
+    monkeypatch.setattr(web.sys, "stdin", type("T", (), {"isatty": staticmethod(lambda: True)})())
+    secrets_typed = iter(["short", "secret-pass", "secret-pass"])
+    real_ask = web_auth.ask
+    monkeypatch.setattr(web_auth, "ask", lambda say: real_ask(
+        say, read=lambda _: "admin", read_secret=lambda _: next(secrets_typed)))
+    said = []
+    auth = web._load_auth(said.append, reset=False, path=tmp_path / "web.json")
+    assert auth.login == "admin"
+    assert any("короче 8" in line for line in said)
+    assert web_auth.load(tmp_path / "web.json")[0] == "admin"
+
+
+def test_no_terminal_and_no_password_refuses(monkeypatch, tmp_path):
+    monkeypatch.setattr(web.sys, "stdin", type("T", (), {"isatty": staticmethod(lambda: False)})())
+    said = []
+    assert web._load_auth(said.append, reset=False, path=tmp_path / "web.json") is None
+    assert "не из терминала" in said[0]
+
+
+
+
+@pytest.fixture
+def auth_app(monkeypatch):
+    monkeypatch.setattr(web, "docker_suggestions", lambda: {"docker": False, "containers": [], "images": []})
+    monkeypatch.setattr(web, "engines_info", lambda: [])
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    application = web.WebApp(web.JobStore(runner=_fake_runner),
+                             auth=web_auth.Auth("d", web_auth.hash_password("secret-pass")))
+    httpd = ThreadingHTTPServer(("127.0.0.1", port), web.make_handler(application, port))
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    yield application, f"http://127.0.0.1:{port}", port
+    httpd.shutdown()
+    httpd.server_close()
+
+
+def _req(url, data=None, cookie=None):
+    opener = urllib.request.build_opener(_NoRedirect)
+    body = urllib.parse.urlencode(data).encode() if data is not None else None
+    req = urllib.request.Request(url, data=body, headers={"Cookie": cookie} if cookie else {})
+    try:
+        return opener.open(req)
+    except urllib.error.HTTPError as exc:
+        return exc
+
+
+def test_pages_need_login(auth_app):
+    application, base, port = auth_app
+    resp = _req(base + "/")
+    assert resp.status == 303 and resp.headers["Location"] == "/login"
+    assert _req(base + "/jobs/1/status").status == 401
+    assert _req(base + "/jobs", {"token": application.token, "target": "alpine"}).status == 303
+    assert not application.store.jobs                           # без входа проверка не запущена
+    assert "Вход" in _req(base + "/login").read().decode()
+
+
+def test_login_logout_flow(auth_app):
+    application, base, port = auth_app
+    bad = _req(base + "/login", {"token": application.token, "login": "d", "password": "nope"})
+    assert bad.status == 401 and "Неверный логин" in bad.read().decode()
+    ok = _req(base + "/login", {"token": application.token, "login": "d", "password": "secret-pass"})
+    assert ok.status == 303
+    cookie = ok.headers["Set-Cookie"].split(";")[0]
+    assert cookie.startswith(f"cast_session_{port}=") and "HttpOnly" in ok.headers["Set-Cookie"]
+    page = _req(base + "/", cookie=cookie)
+    assert page.status == 200 and "Выйти" in page.read().decode()
+    _req(base + "/logout", cookie=cookie)
+    assert _req(base + "/", cookie=cookie).status == 303        # после выхода сессии нет

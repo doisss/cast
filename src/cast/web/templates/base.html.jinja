@@ -56,6 +56,13 @@
   .btn.primary:hover { filter: brightness(1.08); }
   input[type=text] { width: 100%; font: inherit; color: var(--text); background: var(--panel-2);
          border: 1px solid var(--line); border-radius: 8px; padding: .6rem .8rem; }
+  input[type=password] { width: 100%; font: inherit; color: var(--text); background: var(--panel-2);
+                         border: 1px solid var(--line); border-radius: 8px; padding: .6rem .8rem; }
+  input[type=password]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+  .login { max-width: 380px; margin: 3rem auto; }
+  .login form { display: flex; flex-direction: column; gap: .8rem; }
+  .login label { display: flex; flex-direction: column; gap: .25rem; font-weight: 600; font-size: .9rem; }
+  .login-error { color: var(--crit); background: var(--crit-soft); border-radius: 6px; padding: .4rem .6rem; }
   input[type=text]:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
   .chip { display: inline-flex; align-items: center; gap: .35rem; border: 1px solid var(--line);
           background: var(--panel-2); border-radius: 999px; padding: .2rem .65rem; font-size: .82rem;
@@ -112,7 +119,7 @@
 <header class="top">
   <a class="logo" href="/">cast<span>.</span></a>
   <span class="ver">веб-интерфейс · v{{ version }}</span>
-  <nav><a href="/">Новая проверка</a></nav>
+  {% if not login_page %}<nav><a href="/">Новая проверка</a>{% if auth_on %}<a href="/logout">Выйти</a>{% endif %}</nav>{% endif %}
 </header>
 <main>
 {% block body %}{% endblock %}
