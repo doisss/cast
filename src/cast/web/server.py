@@ -4,8 +4,9 @@ pipeline.run_scan(), что и консоль. Логика проверки н�
 принимает цель, запускает проверку в фоне и рисует ScanResult.
 
 Без новых зависимостей: встроенный http.server и Jinja2 (она уже нужна HTML-отчёту).
-По умолчанию слушает только 127.0.0.1; с --host 0.0.0.0 открыт в сеть (например,
-чтобы зайти с хоста на ВМ). Запросы принимаются только по адресам этой машины, а
+По умолчанию открыт в сеть: зайти можно и с этой машины, и с другой (например, с
+хоста на ВМ); --local — только с этой машины. Запросы принимаются только по
+адресам и имени этой машины, а
 POST-запросы проверяются токеном: чужая страница в браузере не может запустить
 проверку на этой машине.
 """
@@ -13,6 +14,7 @@ POST-запросы проверяются токеном: чужая стран
 from __future__ import annotations
 
 import json
+import socket
 import queue
 import secrets
 import shlex
@@ -342,7 +344,7 @@ def _lan_addresses() -> list[str]:
         out = subprocess.run(["ip", "-4", "-o", "addr", "show"], capture_output=True,
                              text=True, timeout=5).stdout
     except (OSError, subprocess.TimeoutExpired):
-        return []
+        out = ""
     addrs = []
     for line in out.splitlines():
         fields = line.split()
@@ -351,30 +353,79 @@ def _lan_addresses() -> list[str]:
         if "/32" in fields[3]:   # точка-точка (VPN) — с хоста по нему не зайти
             continue
         addrs.append(fields[3].split("/")[0])
+    if not addrs and not out:
+        # нет команды ip: адрес, через который машина ходит в сеть. connect у UDP
+        # ничего не отправляет, только выбирает маршрут
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+                sock.connect(("192.0.2.1", 9))
+                addr = sock.getsockname()[0]
+            if not addr.startswith("127."):
+                addrs.append(addr)
+        except OSError:
+            pass
     return addrs
 
 
-def serve(port: int = 8765, open_browser: bool = True, console=None,
-          host: str = "127.0.0.1") -> int:
-    say = console.print if console else print
-    local = host in ("127.0.0.1", "localhost")
-    addresses = [] if local else (_lan_addresses() if host == "0.0.0.0" else [host])
-    app = WebApp()
+def _host_names() -> list[str]:
+    """Имя машины: с другой машины часто заходят по нему (kali:8765, kali.local:8765)."""
+    name = socket.gethostname()
+    return [name, f"{name}.local"] if name and name != "localhost" else []
+
+
+def _firewall_hint(port: int) -> str | None:
+    """ufw на Debian/Ubuntu по умолчанию выключен; если включён — порт закрыт снаружи."""
     try:
-        httpd = ThreadingHTTPServer((host, port), make_handler(app, port, addresses))
-    except OSError as exc:
-        say(f"Ошибка: не удалось слушать {host}:{port}: {exc.strerror}. "
-            "Укажите другой порт: cast web --port 8800")
+        conf = Path("/etc/ufw/ufw.conf").read_text()
+    except OSError:
+        return None
+    if "ENABLED=yes" in conf.replace(" ", ""):
+        return (f"Включён брандмауэр ufw: если с другой машины не открывается, "
+                f"разрешите порт: sudo ufw allow {port}/tcp")
+    return None
+
+
+PORT_TRIES = 10   # занят порт — пробуем следующие
+
+
+def serve(port: int = 8765, open_browser: bool = True, console=None,
+          local: bool = False, port_fixed: bool = False) -> int:
+    """local — слушать только 127.0.0.1; иначе все адреса машины (0.0.0.0).
+    port_fixed — порт задан явно (--port): если занят, не подбирать другой."""
+    say = console.print if console else print
+    host = "127.0.0.1" if local else "0.0.0.0"
+    addresses = [] if local else _lan_addresses()
+    app = WebApp()
+    httpd, error = None, None
+    for candidate in [port] if port_fixed else range(port, port + PORT_TRIES):
+        try:
+            httpd = ThreadingHTTPServer(
+                (host, candidate), make_handler(app, candidate, addresses + _host_names()))
+            break
+        except OSError as exc:
+            error = exc
+    if httpd is None:
+        busy = f"{port}" if port_fixed else f"{port}–{port + PORT_TRIES - 1}"
+        say(f"Ошибка: не удалось слушать порт {busy}: {error.strerror}. "
+            "Укажите другой: cast web --port 9000")
         return 2
+    if httpd.server_address[1] != port:
+        say(f"Порт {port} занят (наверное, cast web уже запущен) — беру {httpd.server_address[1]}")
+    port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     say(f"Веб-интерфейс cast: {url}")
-    for addr in addresses:
-        say(f"С другой машины:   http://{addr}:{port}/")
     if local:
-        say("Доступен только с этой машины. Остановить: Ctrl+C")
+        say("Доступен только с этой машины (--local). Остановить: Ctrl+C")
     else:
-        say("Внимание: веб открыт в сеть, любой в этой сети может запускать проверки "
-            "на этой машине. Остановить: Ctrl+C")
+        for addr in addresses:
+            say(f"С другой машины:   http://{addr}:{port}/")
+        if not addresses:
+            say("Адрес в сети не найден (машина не подключена к сети?) — пока доступен только отсюда.")
+        hint = _firewall_hint(port)
+        if hint:
+            say(hint)
+        say("Внимание: любой в этой сети может запускать проверки на этой машине. "
+            "Только для себя: cast web --local. Остановить: Ctrl+C")
     if open_browser:
         import webbrowser
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()

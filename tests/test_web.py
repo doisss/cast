@@ -176,3 +176,52 @@ def test_favicon_is_served_and_linked(app):
         assert resp.headers["Content-Type"] == "image/svg+xml"
         assert resp.read().startswith(b"<svg")
     assert '<link rel="icon"' in urllib.request.urlopen(base + "/").read().decode()
+
+
+def _fake_serve(monkeypatch):
+    """serve() без вечного цикла: запоминаем, на каком адресе он слушал бы."""
+    bound = {}
+
+    class FakeServer:
+        def __init__(self, address, handler):
+            if address[1] in bound.get("busy", ()):
+                raise OSError(98, "Address already in use")
+            self.server_address = address
+            bound["address"] = address
+
+        def serve_forever(self):
+            pass
+
+        def server_close(self):
+            pass
+
+    monkeypatch.setattr(web, "ThreadingHTTPServer", FakeServer)
+    monkeypatch.setattr(web, "_lan_addresses", lambda: ["192.168.0.196"])
+    monkeypatch.setattr(web, "_firewall_hint", lambda port: None)
+    return bound
+
+
+def test_web_is_open_to_lan_by_default(monkeypatch):
+    bound = _fake_serve(monkeypatch)
+    said = []
+    assert web.serve(open_browser=False, console=type("C", (), {"print": staticmethod(said.append)})()) == 0
+    assert bound["address"] == ("0.0.0.0", 8765)
+    assert any("http://192.168.0.196:8765/" in line for line in said)
+
+
+def test_web_local_listens_on_loopback_only(monkeypatch):
+    bound = _fake_serve(monkeypatch)
+    web.serve(open_browser=False, console=type("C", (), {"print": staticmethod(lambda *_: None)})(),
+              local=True)
+    assert bound["address"] == ("127.0.0.1", 8765)
+
+
+def test_busy_port_takes_next_unless_given(monkeypatch):
+    bound = _fake_serve(monkeypatch)
+    bound["busy"] = {8765}
+    quiet = type("C", (), {"print": staticmethod(lambda *_: None)})()
+    assert web.serve(open_browser=False, console=quiet) == 0
+    assert bound["address"][1] == 8766
+    del bound["address"]
+    assert web.serve(8765, open_browser=False, console=quiet, port_fixed=True) == 2
+    assert "address" not in bound

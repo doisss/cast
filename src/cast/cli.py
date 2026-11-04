@@ -42,14 +42,15 @@ CAST — Container Automated Security Testing
   cast scan ЦЕЛЬ [-e ДВИЖОК] [-f ФОРМАТ] [-o ФАЙЛ] [--requirements ПУТЬ]
                  [--top N]
   cast engines
-  cast web [--port N] [--host АДРЕС] [--no-browser]
+  cast web [--local] [--port N] [--no-browser]
   cast -h | -v
 
 КОМАНДЫ
   scan      проверить цель и показать отчёт
   engines   показать движки: установлены ли, версия, что умеют проверять
-  web       открыть веб-интерфейс в браузере. По умолчанию только с этой
-            машины; --host 0.0.0.0 — и с других машин сети
+  web       открыть веб-интерфейс в браузере. Доступен с этой машины и с
+            других машин сети (адреса печатаются при запуске); --local —
+            только с этой. Порт 8765, занят — берётся следующий свободный
 
 ЦЕЛЬ — что проверять (вид определяется по записи, угадывать не нужно)
   alpine:3.19, nginx      образ: любое имя без «./» и «/»
@@ -238,10 +239,10 @@ def build_parser() -> argparse.ArgumentParser:
     engines_parser.add_argument("-h", "--help", action=_HelpAction)
 
     web_parser = subparsers.add_parser("web", add_help=False,
-                                       usage="cast web [--port N] [--host АДРЕС] [--no-browser]")
+                                       usage="cast web [--local] [--port N] [--no-browser]")
     web_parser.add_argument("-h", "--help", action=_HelpAction)
-    web_parser.add_argument("--port", type=int, default=8765, metavar="N")
-    web_parser.add_argument("--host", default="127.0.0.1", metavar="АДРЕС")
+    web_parser.add_argument("--port", type=int, default=None, metavar="N")
+    web_parser.add_argument("--local", action="store_true")
     web_parser.add_argument("--no-browser", action="store_true")
     return parser
 
@@ -418,8 +419,8 @@ def main(argv: list[str] | None = None) -> int:
             return cmd_engines(console)
         if args.command == "web":
             from cast.web.server import serve
-            return serve(args.port, open_browser=not args.no_browser, console=console,
-                         host=args.host)
+            return serve(args.port or 8765, open_browser=not args.no_browser, console=console,
+                         local=args.local, port_fixed=args.port is not None)
     except KeyboardInterrupt:
         console.print("\n[yellow]Прервано пользователем.[/yellow]")
         return 130
