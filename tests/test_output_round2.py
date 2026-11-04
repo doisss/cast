@@ -143,6 +143,16 @@ def test_hint_has_no_labels_existing_dim_new_green():
     assert styles["readOnlyRootFilesystem: true"] == "green"
 
 
+def test_changed_value_is_green_without_current_value_label():
+    from cast.report.fix_hint import hint_lines
+    fix = console_report.Text()
+    console_report._append_hint(fix, hint_lines(
+        "KSV-0017", "Change 'containers[].securityContext.privileged' to 'false'.", MSG, CODE_14_17))
+    assert "сейчас" not in fix.plain
+    styles = {fix.plain[span.start:span.end].strip(): span.style for span in fix.spans}
+    assert styles["privileged: false"] == "green"
+
+
 CODE_14_17 = [{"number": 14, "content": "        - name: web", "is_cause": True},
               {"number": 15, "content": "          image: nginx:1.25", "is_cause": True},
               {"number": 16, "content": "          securityContext:", "is_cause": True},

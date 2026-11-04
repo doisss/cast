@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cast.pipeline import ScanResult
-from cast.report.fix_hint import CHANGE, EXISTS, hint_lines
+from cast.report.fix_hint import EXISTS, hint_lines
 from cast.report.sections import STATUS_HELP, Section, build_sections, container_image_note
 
 _SEVERITY_STYLE = {
@@ -217,12 +217,10 @@ def _code_text(lines: list[dict]) -> Text:
 
 
 def _append_hint(fix: Text, lines) -> None:
-    """Кусок YAML под советом: серым — что уже есть в файле, зелёным — что дописать.
-    Если значение в файле другое, рядом — какое там сейчас."""
-    for text, state, old in lines:
+    """Кусок YAML под советом: серым — что менять не нужно, зелёным — что добавить
+    или изменить. Без подписей: цвет и так говорит, что делать."""
+    for text, state, _old in lines:
         fix.append(f"\n  {text}", style="dim" if state == EXISTS else "green")
-        if state == CHANGE:
-            fix.append(f"  ← сейчас {old}", style="yellow")
 
 
 def _print_config_groups(console: Console, findings, top: int) -> None:
