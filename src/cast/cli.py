@@ -42,7 +42,7 @@ CAST — Container Automated Security Testing
   cast scan ЦЕЛЬ [-e ДВИЖОК] [-f ФОРМАТ] [-o ФАЙЛ] [--requirements ПУТЬ]
                  [--top N]
   cast engines
-  cast web [--local] [--port N] [--no-browser] [--reset-password]
+  cast web [--local] [--port N] [--no-browser] [--reset-password] [--no-sudo]
   cast -h | -v
 
 КОМАНДЫ
@@ -52,7 +52,9 @@ CAST — Container Automated Security Testing
             других машин сети (адреса печатаются при запуске); --local —
             только с этой. Порт 8765, занят — берётся следующий свободный.
             Вход по логину и паролю: при первом запуске cast спросит их и
-            сохранит; --reset-password — задать заново
+            сохранит; --reset-password — задать заново. Запускается от root
+            через sudo (host и Docker проверяются только от root);
+            --no-sudo — от текущего пользователя
 
 ЦЕЛЬ — что проверять (вид определяется по записи, угадывать не нужно)
   alpine:3.19, nginx      образ: любое имя без «./» и «/»
@@ -241,12 +243,13 @@ def build_parser() -> argparse.ArgumentParser:
     engines_parser.add_argument("-h", "--help", action=_HelpAction)
 
     web_parser = subparsers.add_parser("web", add_help=False,
-                                       usage="cast web [--local] [--port N] [--no-browser] [--reset-password]")
+                                       usage="cast web [--local] [--port N] [--no-browser] [--reset-password] [--no-sudo]")
     web_parser.add_argument("-h", "--help", action=_HelpAction)
     web_parser.add_argument("--port", type=int, default=None, metavar="N")
     web_parser.add_argument("--local", action="store_true")
     web_parser.add_argument("--reset-password", action="store_true")
     web_parser.add_argument("--no-browser", action="store_true")
+    web_parser.add_argument("--no-sudo", action="store_true")
     return parser
 
 
@@ -424,7 +427,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "engines":
             return cmd_engines(console)
         if args.command == "web":
-            from cast.web.server import serve
+            from cast.web.server import rerun_with_sudo, serve
+            if not args.no_sudo and (code := rerun_with_sudo(console)) is not None:
+                return code
             return serve(args.port or 8765, open_browser=not args.no_browser, console=console,
                          local=args.local, port_fixed=args.port is not None,
                          reset_password=args.reset_password)

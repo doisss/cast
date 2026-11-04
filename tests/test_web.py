@@ -33,11 +33,17 @@ def _fake_runner(target, **kw):
     return run_scan(target, scanners=scanners, **kw)
 
 
+class _FakeDiscovery:
+    def get(self, refresh=False):
+        return {"running": False, "files": {"dockerfile": ["/srv/app/Dockerfile"]}, "cut": False,
+                "roots": ["/srv"], "seconds": 0.1, "kube": False, "context": "", "error": "",
+                "docker": {"docker": True, "containers": [{"name": "web1", "image": "nginx", "status": "Up"}],
+                           "images": [{"ref": "alpine:3.19", "size": "7MB"}]}}
+
+
 @pytest.fixture
 def app(monkeypatch):
-    monkeypatch.setattr(web, "docker_suggestions",
-                        lambda: {"docker": True, "containers": [{"name": "web1", "image": "nginx"}],
-                                 "images": ["alpine:3.19"]})
+    monkeypatch.setattr(web, "Discovery", _FakeDiscovery)
     monkeypatch.setattr(web, "engines_info", lambda: [])
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -75,9 +81,11 @@ def _wait(application, job_id):
 def test_index_shows_suggestions_and_token(app):
     application, base = app
     html = urllib.request.urlopen(base + "/").read().decode()
-    assert "Что проверить?" in html
-    assert "container web1" in html and "alpine:3.19" in html
+    assert "Что проверить?" in html and 'id="fm"' in html
     assert application.token in html
+    found = json.loads(urllib.request.urlopen(base + "/api/discover").read())
+    assert found["docker"]["containers"][0]["name"] == "web1"
+    assert found["files"]["dockerfile"] == ["/srv/app/Dockerfile"]
 
 
 def test_scan_runs_and_report_page_escapes_and_links(app):
@@ -134,7 +142,7 @@ def test_cli_web_reports_busy_port(capsys, monkeypatch, tmp_path):
         s.bind(("127.0.0.1", 0))
         s.listen()
         port = s.getsockname()[1]
-        assert main(["web", "--port", str(port), "--no-browser"]) == 2
+        assert main(["web", "--port", str(port), "--no-browser", "--no-sudo"]) == 2
     assert "не удалось слушать" in capsys.readouterr().out
 
 
@@ -283,7 +291,7 @@ def test_no_terminal_and_no_password_refuses(monkeypatch, tmp_path):
 
 @pytest.fixture
 def auth_app(monkeypatch):
-    monkeypatch.setattr(web, "docker_suggestions", lambda: {"docker": False, "containers": [], "images": []})
+    monkeypatch.setattr(web, "Discovery", _FakeDiscovery)
     monkeypatch.setattr(web, "engines_info", lambda: [])
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -337,9 +345,11 @@ def test_file_panel_lists_dirs_first_and_detects_kind(tmp_path):
     (tmp_path / "Dockerfile").write_text("FROM alpine:3.19\n")
     (tmp_path / "a-dir").mkdir()
     (tmp_path / ".secret").write_text("x")
-    listing = web.list_dir(str(tmp_path))
+    listing = web.web_files.list_dir(str(tmp_path))
     assert [e["name"] for e in listing["entries"]] == ["a-dir", "b.txt", "Dockerfile"]
-    assert ".secret" in [e["name"] for e in web.list_dir(str(tmp_path), show_hidden=True)["entries"]]
+    assert [e["kind"] for e in listing["entries"]] == ["папка", "txt", "файл"]
+    assert all(e["mtime"] > 0 for e in listing["entries"])
+    assert ".secret" in [e["name"] for e in web.web_files.list_dir(str(tmp_path), show_hidden=True)["entries"]]
     assert web.what_is(str(tmp_path / "Dockerfile")) == {"ok": True, "text": "Dockerfile"}
     assert web.what_is(str(tmp_path / "нет")) ["ok"] is False
 
@@ -364,10 +374,12 @@ def test_config_page_groups_by_place_with_terminal_code():
     application = web.WebApp(web.JobStore(runner=_fake_runner))
     job = web.Job(1, "deploy.yaml", None, state="done", target=result.target, result=result)
     html = application.page_job(job)
-    assert "▌ deploy.yaml:16-17" in html and "Показать код везде" in html
+    assert "▌ deploy.yaml:16-17" in html and "Код из файла" in html
     assert '<span class="mk">┌</span>' in html and '<span class="mk">└</span>' in html
     assert 'class="h-exists">    securityContext:' in html
-    assert "← сейчас true" in html
+    assert "сейчас" not in html
+    assert 'class="h-new">      privileged: false' in html
+    assert "зелёным</span> — добавить или изменить" in html
 
 
 def test_password_file_under_sudo_is_the_users(monkeypatch, tmp_path):
@@ -388,3 +400,117 @@ def test_password_file_under_sudo_is_the_users(monkeypatch, tmp_path):
         "st_uid": 0, "st_mode": real_stat(self).st_mode})())
     web_auth.save("d", web_auth.hash_password("secret-pass"))
     assert (str(home / ".config" / "cast" / "web.json"), 1000, 1000) in chowned
+
+
+def test_file_api_needs_login_for_changes(auth_app):
+    application, base, port = auth_app
+    assert _req(base + "/api/fs", {"token": application.token, "op": "mkdir", "path": "/tmp", "name": "x"}).status == 401
+    assert _req(base + "/api/discover").status == 401
+    assert _req(base + "/api/view?path=/etc/hostname").status == 401
+
+
+def _login(base, application):
+    r = _req(base + "/login", {"token": application.token, "login": "d", "password": "secret-pass"})
+    return r.headers["Set-Cookie"].split(";")[0]
+
+
+def test_file_operations_through_api(auth_app, tmp_path):
+    application, base, port = auth_app
+    cookie = _login(base, application)
+    fs = lambda **kw: json.loads(_req(base + "/api/fs", {"token": application.token, **kw}, cookie).read())
+    assert fs(op="mkdir", path=str(tmp_path), name="new")["path"] == str(tmp_path / "new")
+    assert fs(op="rename", path=str(tmp_path / "new"), name="renamed")["ok"]
+    assert (tmp_path / "renamed").is_dir()
+    (tmp_path / "renamed" / "f.txt").write_text("привет")
+    view = json.loads(_req(base + "/api/view?path=" + urllib.parse.quote(str(tmp_path / "renamed" / "f.txt")),
+                           cookie=cookie).read())
+    assert view == {"ok": True, "text": "привет"}
+    assert fs(op="delete", path=str(tmp_path / "renamed"))["ok"]
+    assert not (tmp_path / "renamed").exists()
+    bad = _req(base + "/api/fs", {"token": application.token, "op": "delete", "path": "/usr"}, cookie)
+    assert bad.status == 400 and "системная" in json.loads(bad.read())["error"]
+    bad = _req(base + "/api/fs", {"token": "wrong", "op": "mkdir", "path": str(tmp_path), "name": "y"}, cookie)
+    assert bad.status == 403 and not (tmp_path / "y").exists()
+
+
+def test_file_names_cannot_escape_folder(tmp_path):
+    with pytest.raises(web.web_files.FileError):
+        web.web_files.make_dir(str(tmp_path), "../evil")
+    with pytest.raises(web.web_files.FileError):
+        web.web_files.rename("/", "x")
+    (tmp_path / "bin.dat").write_bytes(b"\0\1\2")
+    assert web.web_files.read_text(str(tmp_path / "bin.dat"))["ok"] is False
+
+
+def test_several_targets_queue_several_jobs(app):
+    application, base = app
+    code, location = _post(base, {"token": application.token, "target": ["alpine:3.19", "nginx:1"]})
+    assert code == 303 and location == "/jobs/1"
+    assert [j.query for j in application.store.recent()] == ["nginx:1", "alpine:3.19"]
+
+
+def test_discovery_finds_what_cast_can_scan(tmp_path):
+    from cast.web.discover import scan_files
+    (tmp_path / "app").mkdir()
+    (tmp_path / "app" / "Dockerfile").write_text("FROM alpine:3.19\n")
+    (tmp_path / "app" / "requirements.txt").write_text("django==2.2\n")
+    (tmp_path / "app" / ".git").mkdir()
+    (tmp_path / "k8s").mkdir()
+    (tmp_path / "k8s" / "deploy.yaml").write_text("apiVersion: v1\nkind: Pod\n")
+    (tmp_path / "k8s" / "tpl.yaml").write_text("apiVersion: v1\nkind: Pod\nname: {{ .Values.x }}\n")
+    (tmp_path / "chart" / "templates").mkdir(parents=True)
+    (tmp_path / "chart" / "Chart.yaml").write_text("name: c\n")
+    (tmp_path / "chart" / "templates" / "d.yaml").write_text("apiVersion: v1\nkind: Pod\n")
+    (tmp_path / "node_modules" / "x").mkdir(parents=True)
+    (tmp_path / "node_modules" / "x" / "Dockerfile").write_text("FROM x\n")
+    (tmp_path / "dockerfile.cast.json").write_text("{}")
+    found, cut = scan_files([tmp_path])
+    assert not cut
+    assert found["dockerfile"] == [str(tmp_path / "app" / "Dockerfile")]
+    assert found["Kubernetes"] == [str(tmp_path / "k8s" / "deploy.yaml")]
+    assert found["Helm"] == [str(tmp_path / "chart")]
+    assert found["project"] == [str(tmp_path / "app")] and found["git"] == [str(tmp_path / "app")]
+
+
+def test_cluster_page_groups_by_resource_and_image():
+    from cast.pipeline import ScanResult, ScannerRun
+    from cast.targets import Target
+    conf = Finding(source_tool="trivy", check_id="KSV-0014", title="RO fs", severity=Severity.HIGH,
+                   remediation="Change 'containers[].securityContext.readOnlyRootFilesystem' to 'true'.",
+                   location="cast-demo/Deployment/web: Deployment/web:33-48", pkg_type="config",
+                   message="Container 'web' of Deployment 'web' should set 'securityContext.readOnlyRootFilesystem' to true",
+                   code_lines=[{"number": 40, "content": "        securityContext:", "is_cause": True}])
+    vuln = Finding(source_tool="trivy", check_id="CVE-2026-1", title="bug", severity=Severity.CRITICAL,
+                   package="openssl", installed_version="3.0", fixed_version="3.1",
+                   location="cast-demo/Deployment/web: alpine:3.18.0 (alpine 3.18.0)")
+    for f in (conf, vuln):
+        f.confirmed_by = ["trivy"]
+    result = ScanResult(image="cluster", findings=[conf, vuln], target=Target("cluster", "cluster"),
+                        runs=[ScannerRun("trivy", "cluster", "ok", "", 2, 1.0)])
+    application = web.WebApp(web.JobStore(runner=_fake_runner))
+    html = application.page_job(web.Job(1, "cluster", None, state="done", target=result.target, result=result))
+    assert "Ошибки конфигурации ресурсов" in html and "Уязвимости в образах" in html
+    assert "▌ строки 33–48" in html and "readOnlyRootFilesystem: true" in html
+    assert "▌ alpine:3.18.0 (alpine 3.18.0)" in html and "1 шт., ресурсов: 1" in html
+    assert "class=\"mono nowrap\"" not in html and "small nowrap" not in html
+
+
+def test_web_reruns_itself_with_sudo(monkeypatch, tmp_path):
+    (tmp_path / ".kube").mkdir()
+    (tmp_path / ".kube" / "config").write_text("x")
+    cmd = web.sudo_command(["web", "--port", "9000"], {"PATH": "/home/d/.local/bin:/usr/bin", "HOME": str(tmp_path)})
+    assert cmd[:3] == ["sudo", "--", "env"]
+    assert "PATH=/home/d/.local/bin:/usr/bin" in cmd and f"KUBECONFIG={tmp_path}/.kube/config" in cmd
+    assert cmd[-5:] == ["-m", "cast", "web", "--port", "9000"]
+    ran = []
+    monkeypatch.setattr(web.os, "geteuid", lambda: 1000)
+    monkeypatch.setattr(web.shutil, "which", lambda name: "/usr/bin/sudo")
+    assert web.rerun_with_sudo(run=lambda c: ran.append(c) or 0) == 0 and ran[0][0] == "sudo"
+    monkeypatch.setattr(web.os, "geteuid", lambda: 0)
+    assert web.rerun_with_sudo(run=lambda c: 1 / 0) is None     # уже root — не перезапускаем
+
+
+def test_no_sudo_flag_skips_rerun(monkeypatch, tmp_path):
+    monkeypatch.setattr(web, "rerun_with_sudo", lambda console=None: pytest.fail("sudo не нужен"))
+    monkeypatch.setattr(web, "serve", lambda *a, **kw: 0)
+    assert main(["web", "--no-sudo"]) == 0

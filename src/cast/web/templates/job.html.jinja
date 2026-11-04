@@ -1,4 +1,87 @@
 {% extends "base.html.jinja" %}
+{% macro sev_pill(f) %}<span class="pill sev-{{ f.severity.value }}">{{ f.severity.value | upper }}</span>{% endmacro %}
+
+{% macro places_block(places) %}
+{% for pl in places %}
+<div class="place" data-place>
+  <div class="place-head">
+    <span class="mono">▌ {{ pl.label }}</span>
+    <span class="small">{{ pl.rules | length }} шт.:</span>
+    {% for sev in ["critical", "high", "medium", "low", "unknown"] if pl.counts[sev] %}
+    <span class="pill sev-{{ sev }}">{{ sev | upper }} {{ pl.counts[sev] }}</span>
+    {% endfor %}
+  </div>
+  {% if pl.code %}
+  <details class="code-details"><summary>код в файле</summary>
+    <pre class="term">{% for l in pl.code %}<span class="ln">{{ "%4s" | format(l.number) }}</span> <span class="mk">{{ l.mark }}</span> <span class="{{ '' if l.cause else 'dimmed' }}">{{ l.content }}</span>
+{% endfor %}</pre></details>
+  {% elif pl.no_code %}<p class="muted small">Trivy не прислал строки кода для этого места.</p>{% endif %}
+  {% set has_hint = pl.rules | selectattr("hint") | list | length > 0 %}
+  {% if has_hint %}<p class="legend narrow-only"><span class="h-exists">серым</span> — менять не нужно,
+    <span class="h-new">зелёным</span> — добавить или изменить</p>{% endif %}
+  <div class="table-wrap"><table class="fixed">
+    <colgroup><col style="width:6.5rem"><col style="width:6.5rem"><col><col style="width:44%"></colgroup>
+    <thead><tr><th>Уровень</th><th>ID</th><th>Что не так</th>
+      <th>Как исправить{% if has_hint %}<span class="legend"><span class="h-exists">серым</span> — менять не нужно,
+        <span class="h-new">зелёным</span> — добавить или изменить</span>{% endif %}</th></tr></thead>
+    <tbody>
+    {% for r in pl.rules %}{% set f = r.f %}
+      <tr data-row data-key="{{ f.severity.value }}"
+          data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (f.location or '')) | lower }}">
+        <td class="c-head">{{ sev_pill(f) }}</td>
+        <td class="mono c-head">{{ f.check_id }}</td>
+        <td data-label="Что не так">{{ f.title }}
+          {% if r.message %}<div class="sub-line">{{ r.message }}</div>{% endif %}
+          {% if f.url %}<div><a class="small" href="{{ f.url }}" target="_blank" rel="noopener">{{ f.url }}</a></div>{% endif %}
+        </td>
+        <td class="small" data-label="Как исправить">{{ f.remediation or "—" }}
+          {% if r.hint %}<pre class="hint">{% for h in r.hint %}<span class="{{ 'h-exists' if h.state == 'exists' else 'h-new' }}">{{ h.text }}</span>
+{% endfor %}</pre>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table></div>
+</div>
+{% endfor %}
+{% endmacro %}
+
+{% macro vuln_table(rows, show_where) %}
+{% set fs = rows | map(attribute="f") | list %}
+{% set has_pkg = fs | selectattr("package") | list | length > 0 %}
+{% set has_ver = fs | selectattr("installed_version") | list | length > 0 %}
+{% set has_loc = show_where and fs | selectattr("location") | list | length > 0 %}
+<div class="table-wrap" style="margin-top:.6rem"><table class="fixed">
+  <colgroup><col style="width:6.5rem"><col style="width:9.5rem">
+    {% if has_pkg %}<col style="width:15%">{% endif %}
+    {% if has_ver %}<col style="width:11.5rem"><col style="width:11.5rem">{% endif %}
+    <col>{% if has_loc %}<col style="width:20%">{% endif %}</colgroup>
+  <thead><tr><th>Уровень</th><th>ID</th>
+    {% if has_pkg %}<th>Пакет</th>{% endif %}
+    {% if has_ver %}<th>Установлена</th><th>Исправлено в</th>{% endif %}
+    <th>Название</th>
+    {% if has_loc %}<th>Где</th>{% endif %}</tr></thead>
+  <tbody>
+  {% for r in rows %}{% set f = r.f %}
+    <tr data-row data-key="{{ f.severity.value }}"
+        data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (r.packages | join(' ')) ~ ' ' ~ (f.location or '')) | lower }}">
+      <td class="c-head">{{ sev_pill(f) }}</td>
+      <td class="mono c-head">{% if f.url %}<a href="{{ f.url }}" target="_blank" rel="noopener">{{ f.check_id }}</a>{% else %}{{ f.check_id }}{% endif %}</td>
+      {% if has_pkg %}<td class="mono c-inline" data-label="Пакет">{% for pk in r.packages %}<div>{{ pk }}</div>{% else %}—{% endfor %}</td>{% endif %}
+      {% if has_ver %}
+      <td class="mono small c-inline" data-label="Установлена">{{ f.installed_version or "—" }}</td>
+      <td class="mono small c-inline" style="color:var(--ok)" data-label="Исправлено в">{{ f.fixed_version or "" }}{% if not f.fixed_version %}<span class="muted">исправления нет</span>{% endif %}</td>
+      {% endif %}
+      <td data-label="Название">{{ f.title }}
+        {% if f.remediation %}<div class="fix">Как исправить: {{ f.remediation }}</div>{% endif %}
+      </td>
+      {% if has_loc %}<td class="mono small" data-label="Где">{{ f.location or "—" }}</td>{% endif %}
+    </tr>
+  {% endfor %}
+  </tbody>
+</table></div>
+{% endmacro %}
+
 {% block title %}cast — {{ job.query }}{% endblock %}
 {% block body %}
 <div class="row" style="margin-bottom:1rem">
@@ -12,8 +95,10 @@
   </div>
   <span class="spacer"></span>
   {% if result %}
-  <a class="btn" href="/jobs/{{ job.id }}/report.html">↓ HTML</a>
-  <a class="btn" href="/jobs/{{ job.id }}/report.json">↓ JSON</a>
+  <span class="row" style="flex-wrap:nowrap">
+    <a class="btn" href="/jobs/{{ job.id }}/report.html">↓ HTML</a>
+    <a class="btn" href="/jobs/{{ job.id }}/report.json">↓ JSON</a>
+  </span>
   {% endif %}
 </div>
 
@@ -100,87 +185,51 @@
     {% endfor %}
 
   {% else %}
-    <div class="row">
+    <div class="row toolbar">
       {% for sev in ["critical", "high", "medium", "low", "unknown"] if item.counts[sev] %}
       <span class="chip" data-filter="{{ sev }}"><span class="pill sev-{{ sev }}">{{ sev | upper }}</span> {{ item.counts[sev] }}</span>
       {% endfor %}
       <span class="spacer"></span>
-      {% if sec.findings %}<input type="text" data-search-input placeholder="Поиск: CVE, пакет, файл" style="max-width:260px">{% endif %}
+      {% if item.places or item.resources %}
+      <label class="switch" title="Открыть или закрыть код во всех местах сразу"><input type="checkbox" data-code-all><span></span> Код из файла</label>
+      {% endif %}
+      {% if sec.findings %}<input type="text" data-search-input placeholder="Поиск: CVE, пакет, ресурс, файл" class="search">{% endif %}
     </div>
     {% if sec.findings and item.places %}
-    <div class="row" style="margin-top:.6rem">
-      <button class="btn small-btn" type="button" data-code-all>Показать код везде</button>
-      <span class="muted small">Код из файла — как его прислал Trivy: <span class="mono">[</span> или
-        <span class="mono">┌ │ └</span> — строки, на которые указывает правило.
-        В «Как исправить» серым — что в файле уже есть, зелёным — что дописать.</span>
-    </div>
-    {% for pl in item.places %}
-    <div class="place" data-place>
-      <div class="place-head">
-        <span class="mono">▌ {{ pl.place }}{% if pl.whole_file %} — весь файл{% endif %}</span>
-        <span class="small">{{ pl.rules | length }} шт.:</span>
-        {% for sev in ["critical", "high", "medium", "low", "unknown"] if pl.counts[sev] %}
-        <span class="pill sev-{{ sev }}">{{ sev | upper }} {{ pl.counts[sev] }}</span>
-        {% endfor %}
-      </div>
-      {% if pl.code %}
-      <details class="code-details"><summary>код в файле</summary>
-        <pre class="term">{% for l in pl.code %}<span class="ln">{{ "%4s" | format(l.number) }}</span> <span class="mk">{{ l.mark }}</span> <span class="{{ '' if l.cause else 'dimmed' }}">{{ l.content }}</span>
-{% endfor %}</pre></details>
-      {% elif pl.no_code %}<p class="muted small">Trivy не прислал строки кода для этого места.</p>{% endif %}
-      <div class="table-wrap"><table>
-        <thead><tr><th style="width:6.5rem">Уровень</th><th style="width:7rem">ID</th><th>Что не так</th><th style="width:42%">Как исправить</th></tr></thead>
-        <tbody>
-        {% for r in pl.rules %}{% set f = r.f %}
-          <tr data-row data-key="{{ f.severity.value }}"
-              data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (f.location or '')) | lower }}">
-            <td><span class="pill sev-{{ f.severity.value }}">{{ f.severity.value | upper }}</span></td>
-            <td class="mono nowrap">{{ f.check_id }}</td>
-            <td>{{ f.title }}
-              {% if r.message %}<div class="sub-line">{{ r.message }}</div>{% endif %}
-              {% if f.url %}<div><a class="small" href="{{ f.url }}" target="_blank" rel="noopener">{{ f.url }}</a></div>{% endif %}
-            </td>
-            <td class="small">{{ f.remediation or "—" }}
-              {% if r.hint %}<pre class="hint">{% for h in r.hint %}<span class="{{ 'h-exists' if h.state == 'exists' else 'h-new' }}">{{ h.text }}</span>{% if h.old %}<span class="h-old">  ← сейчас {{ h.old }}</span>{% endif %}
-{% endfor %}</pre>{% endif %}
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table></div>
-    </div>
-    {% endfor %}
-    <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
-    {% elif sec.findings %}
-    {% set has_pkg = sec.findings | selectattr("package") | list | length > 0 %}
-    {% set has_ver = sec.findings | selectattr("installed_version") | list | length > 0 %}
-    {% set has_loc = item.show_where and sec.findings | selectattr("location") | list | length > 0 %}
-    <div class="table-wrap" style="margin-top:.6rem"><table>
-      <thead><tr><th style="width:6.5rem">Уровень</th><th>ID</th>
-        {% if has_pkg %}<th>Пакет</th>{% endif %}
-        {% if has_ver %}<th>Установлена</th><th>Исправлено в</th>{% endif %}
-        <th>Название</th>
-        {% if has_loc %}<th>Где</th>{% endif %}</tr></thead>
-      <tbody>
-      {% for r in item.rows %}{% set f = r.f %}
-        <tr data-row data-key="{{ f.severity.value }}"
-            data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (r.packages | join(' ')) ~ ' ' ~ (f.location or '')) | lower }}">
-          <td><span class="pill sev-{{ f.severity.value }}">{{ f.severity.value | upper }}</span></td>
-          <td class="mono nowrap">{% if f.url %}<a href="{{ f.url }}" target="_blank" rel="noopener">{{ f.check_id }}</a>{% else %}{{ f.check_id }}{% endif %}</td>
-          {% if has_pkg %}<td class="mono">{% for pk in r.packages %}<div class="nowrap">{{ pk }}</div>{% else %}—{% endfor %}</td>{% endif %}
-          {% if has_ver %}
-          <td class="mono small nowrap">{{ f.installed_version or "—" }}</td>
-          <td class="mono small" style="color:var(--ok); min-width:9rem">{{ f.fixed_version or "" }}{% if not f.fixed_version %}<span class="muted">исправления нет</span>{% endif %}</td>
-          {% endif %}
-          <td>{{ f.title }}
-            {% if f.remediation %}<div class="fix">Как исправить: {{ f.remediation }}</div>{% endif %}
-          </td>
-          {% if has_loc %}<td class="mono small nowrap">{{ f.location or "—" }}</td>{% endif %}
-        </tr>
+      {{ places_block(item.places) }}
+      <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
+    {% elif sec.findings and item.resources is defined %}
+      {% if item.resources %}
+      <h3 class="sub-h">Ошибки конфигурации ресурсов <span class="muted">{{ item.resources | sum(attribute="total") }} шт., ресурсов: {{ item.resources | length }}</span></h3>
+      {% for g in item.resources %}
+      <details class="group" data-group{% if loop.first %} open{% endif %}>
+        <summary><span class="mono">{{ g.name }}</span> <span class="small muted">{{ g.total }} шт.</span>
+          {% for sev in ["critical", "high", "medium", "low", "unknown"] if g.counts[sev] %}<span class="pill sev-{{ sev }}">{{ sev | upper }} {{ g.counts[sev] }}</span>{% endfor %}</summary>
+        {{ places_block(g.places) }}
+      </details>
       {% endfor %}
-      </tbody>
-    </table></div>
-    <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
+      {% endif %}
+      {% if item.vulns %}
+      <h3 class="sub-h">Уязвимости в образах <span class="muted">{{ item.vulns | sum(attribute="total") }} шт., ресурсов: {{ item.vulns | length }}</span></h3>
+      {% for g in item.vulns %}
+      <details class="group" data-group{% if loop.first and not item.resources %} open{% endif %}>
+        <summary><span class="mono">{{ g.name }}</span> <span class="small muted">{{ g.total }} шт.</span>
+          {% for sev in ["critical", "high", "medium", "low", "unknown"] if g.counts[sev] %}<span class="pill sev-{{ sev }}">{{ sev | upper }} {{ g.counts[sev] }}</span>{% endfor %}</summary>
+        {% for t in g.targets %}
+        <div class="place" data-place>
+          <div class="place-head"><span class="mono">▌ {{ t.name }}</span> <span class="small muted" style="font-weight:400">{{ t.what }}</span>
+            <span class="small">{{ t.total }} шт.:</span>
+            {% for sev in ["critical", "high", "medium", "low", "unknown"] if t.counts[sev] %}<span class="pill sev-{{ sev }}">{{ sev | upper }} {{ t.counts[sev] }}</span>{% endfor %}</div>
+          {{ vuln_table(t.rows, false) }}
+        </div>
+        {% endfor %}
+      </details>
+      {% endfor %}
+      {% endif %}
+      <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
+    {% elif sec.findings %}
+      {{ vuln_table(item.rows, item.show_where) }}
+      <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
     {% elif sec.note %}<p>{{ sec.note }}</p>
     {% else %}<p class="banner" style="background:var(--ok-soft);color:var(--ok)">Проблем не найдено.</p>{% endif %}
   {% endif %}
@@ -223,6 +272,12 @@
         const ok = !off.has(row.dataset.key) && (!q || row.dataset.search.includes(q));
         row.classList.toggle("hidden", !ok); if (ok) shown++;
       });
+      // место в файле, ресурс или образ без подходящих строк — прячем целиком
+      sec.querySelectorAll("[data-place], [data-group]").forEach(box => {
+        const any = box.querySelector("[data-row]:not(.hidden)");
+        box.classList.toggle("hidden", !any);
+        if (q && any && box.matches("[data-group]")) box.open = true;
+      });
       const empty = sec.querySelector("[data-empty]");
       if (empty) empty.classList.toggle("hidden", shown > 0);
     };
@@ -233,12 +288,8 @@
     }));
     if (search) search.addEventListener("input", apply);
     const all = sec.querySelector("[data-code-all]");
-    if (all) all.addEventListener("click", () => {
-      const blocks = sec.querySelectorAll("details.code-details");
-      const open = !Array.from(blocks).every(d => d.open);
-      blocks.forEach(d => d.open = open);
-      all.textContent = open ? "Скрыть код везде" : "Показать код везде";
-    });
+    if (all) all.addEventListener("change", () =>
+      sec.querySelectorAll("details.code-details").forEach(d => d.open = all.checked));
   });
 </script>
 {% endblock %}

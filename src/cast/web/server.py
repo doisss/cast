@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+import re
+import shutil
 import sys
 from http.cookies import CookieError, SimpleCookie
 import socket
@@ -44,6 +46,8 @@ from cast.report.sections import (STATUS_HELP, build_sections, container_image_n
 from cast.scanners import ALL_SCANNERS, ProgressUI
 from cast.targets import KIND_TITLES, Target, TargetError, resolve_target, run_docker
 from cast.web import auth as web_auth
+from cast.web import files as web_files
+from cast.web.discover import Discovery, user_home
 
 _TEMPLATES_DIR = Path(__file__).parent / "templates"
 _FAVICON = (Path(__file__).parent / "static" / "favicon.svg").read_bytes()
@@ -180,22 +184,6 @@ def engines_info() -> list[dict]:
     return info
 
 
-def docker_suggestions() -> dict:
-    """Запущенные контейнеры и локальные образы — чтобы выбрать цель одним щелчком."""
-    containers, images = [], []
-    ps = run_docker("ps", "--format", "{{.Names}}\t{{.Image}}")
-    if ps is not None and ps.returncode == 0:
-        for line in ps.stdout.splitlines():
-            name, _, image = line.partition("\t")
-            if name:
-                containers.append({"name": name, "image": image})
-    im = run_docker("images", "--format", "{{.Repository}}:{{.Tag}}")
-    if im is not None and im.returncode == 0:
-        images = [x for x in im.stdout.splitlines() if x and "<none>" not in x][:12]
-    return {"docker": ps is not None and ps.returncode == 0,
-            "containers": containers, "images": images}
-
-
 def _code_lines(lines: list[dict]) -> list[dict]:
     """Строки кода как в терминале: номер, отметка [ или ┌ │ └ у строк-причин."""
     causes = [i for i, line in enumerate(lines) if line["is_cause"]]
@@ -212,7 +200,16 @@ def _code_lines(lines: list[dict]) -> list[dict]:
     return out
 
 
-def _config_places(findings) -> list[dict]:
+def _place_label(place: str, cluster: bool) -> str:
+    if not cluster:
+        return place + ("" if _has_lines(place) or place == "—" else " — весь файл")
+    m = re.search(r":(\d+)(?:-(\d+))?$", place)
+    if not m:
+        return "весь ресурс"
+    return f"строки {m.group(1)}–{m.group(2)}" if m.group(2) else f"строка {m.group(1)}"
+
+
+def _config_places(findings, cluster: bool = False) -> list[dict]:
     """Ошибки конфигурации по месту в файле — как в терминале: код один раз, правила под ним."""
     places = []
     for place, group in _group_by_place(findings):
@@ -223,46 +220,11 @@ def _config_places(findings) -> list[dict]:
                      "old": old if st == CHANGE else None}
                     for t, st, old in hint_lines(f.check_id, f.remediation, f.message, f.code_lines or code)]
             rules.append({"f": f, "message": f.message if _message_differs(f) else "", "hint": hint})
-        places.append({"place": place, "whole_file": not _has_lines(place) and place != "—",
+        places.append({"place": place, "label": _place_label(place, cluster),
+                       "whole_file": not _has_lines(place) and place != "—",
                        "counts": _sev_counts(group), "code": _code_lines(code), "rules": rules,
                        "no_code": not code and _has_lines(place)})
     return places
-
-
-def _kubeconfig() -> bool:
-    """Есть ли kubeconfig, с которым Trivy пойдёт в кластер."""
-    paths = os.environ.get("KUBECONFIG", "").split(os.pathsep) if os.environ.get("KUBECONFIG") else []
-    paths.append(str(Path.home() / ".kube" / "config"))
-    return any(p and Path(p).is_file() for p in paths)
-
-
-def list_dir(raw: str, show_hidden: bool = False) -> dict:
-    """Содержимое папки для панели файлов. Только имена и размеры: файлы не читаются."""
-    path = Path(raw or os.getcwd()).expanduser()
-    try:
-        path = path.resolve()
-        if not path.is_dir():
-            path = path.parent
-        entries = []
-        with os.scandir(path) as it:
-            for entry in it:
-                if entry.name.startswith(".") and not show_hidden:
-                    continue
-                try:
-                    is_dir = entry.is_dir()
-                    size = 0 if is_dir else entry.stat().st_size
-                except OSError:
-                    is_dir, size = False, 0
-                entries.append({"name": entry.name, "path": str(path / entry.name),
-                                "dir": is_dir, "size": size})
-    except PermissionError:
-        return {"path": str(path), "parent": str(path.parent), "entries": [],
-                "error": "нет прав читать эту папку"}
-    except OSError as exc:
-        return {"path": str(path), "parent": str(path.parent), "entries": [],
-                "error": exc.strerror or str(exc)}
-    entries.sort(key=lambda e: (not e["dir"], e["name"].lower()))
-    return {"path": str(path), "parent": str(path.parent), "entries": entries, "error": ""}
 
 
 def what_is(raw: str) -> dict:
@@ -277,6 +239,56 @@ def what_is(raw: str) -> dict:
     if getattr(target, "subtype", ""):
         title += f" ({target.subtype})"
     return {"ok": True, "text": title}
+
+
+def _split_location(f) -> tuple[str, str]:
+    """У кластера место — «ресурс: что внутри»: «kube-system/Pod/etcd: Pod/etcd:17-29»
+    у ошибок конфигурации и «kube-system/Pod/etcd: registry.k8s.io/etcd:3.5 (debian 12)» у уязвимостей."""
+    loc = f.location or ""
+    resource, sep, rest = loc.partition(": ")
+    return (resource, rest) if sep else (loc or "—", "")
+
+
+def _worst(findings) -> int:
+    return max((f.severity.rank for f in findings), default=0)
+
+
+def _cluster_resources(findings) -> list[dict]:
+    """Ошибки конфигурации кластера: по ресурсам, внутри — места, как у файла."""
+    groups: dict[str, list] = {}
+    for f in findings:
+        resource, rest = _split_location(f)
+        groups.setdefault(resource, []).append(f)
+    out = []
+    for resource, group in groups.items():
+        out.append({"name": resource, "counts": _sev_counts(group), "total": len(group),
+                    "worst": _worst(group), "places": _config_places(group, cluster=True)})
+    out.sort(key=lambda g: (-g["worst"], -g["total"], g["name"]))
+    return out
+
+
+def _cluster_vulns(findings) -> list[dict]:
+    """Уязвимости кластера: по ресурсам, внутри — по тому, где нашёл Trivy: ОС образа
+    («registry.k8s.io/kube-proxy:v1.31.0 (debian 12.5)») или программа в образе
+    («usr/local/bin/kube-proxy»)."""
+    groups: dict[str, dict[str, list]] = {}
+    for f in findings:
+        resource, target = _split_location(f)
+        groups.setdefault(resource, {}).setdefault(target or resource, []).append(f)
+    out = []
+    for resource, targets in groups.items():
+        parts = []
+        for target, group in targets.items():
+            os_image = target.endswith(")") and " (" in target
+            parts.append({"name": target, "what": "образ" if os_image else "программа в образе",
+                          "counts": _sev_counts(group), "total": len(group), "worst": _worst(group),
+                          "rows": [{"f": f, "packages": pk} for f, pk in _merge_same(group)]})
+        parts.sort(key=lambda t: (-t["worst"], -t["total"], t["name"]))
+        every = [f for group in targets.values() for f in group]
+        out.append({"name": resource, "targets": parts, "counts": _sev_counts(every),
+                    "total": len(every), "worst": _worst(every)})
+    out.sort(key=lambda g: (-g["worst"], -g["total"], g["name"]))
+    return out
 
 
 def _sev_counts(findings) -> dict[str, int]:
@@ -320,6 +332,7 @@ class WebApp:
     def __init__(self, store: JobStore | None = None, auth: web_auth.Auth | None = None):
         self.store = store or JobStore()
         self.auth = auth                 # None — без входа (только в тестах)
+        self.discovery = Discovery()
         self.token = secrets.token_urlsafe(24)
         self.env = Environment(loader=FileSystemLoader(_TEMPLATES_DIR),
                                autoescape=select_autoescape(["html", "jinja"]))
@@ -331,9 +344,8 @@ class WebApp:
         return self.env.get_template(name).render(**ctx)
 
     def page_index(self) -> str:
-        return self.render("index.html.jinja", engines=engines_info(),
-                           suggest=docker_suggestions(), jobs=self.store.recent(),
-                           cwd=os.getcwd(), is_root=os.geteuid() == 0, kube=_kubeconfig())
+        return self.render("index.html.jinja", engines=engines_info(), jobs=self.store.recent(),
+                           cwd=os.getcwd(), home=str(user_home()), is_root=os.geteuid() == 0)
 
     def page_job(self, job: Job) -> str:
         sections, note = [], ""
@@ -348,6 +360,11 @@ class WebApp:
                     data["counts"] = _sev_counts(sec.findings)
                     if job.result.kind in ("config", "dockerfile"):
                         data["places"] = _config_places(sec.findings)
+                    elif job.result.kind == "cluster":
+                        configs = [f for f in sec.findings if f.pkg_type == "config"]
+                        data["resources"] = _cluster_resources(configs)
+                        data["vulns"] = _cluster_vulns([f for f in sec.findings if f.pkg_type != "config"])
+                        data["config_counts"] = _sev_counts(configs)
                     else:
                         data["rows"] = [{"f": f, "packages": pk} for f, pk in _merge_same(sec.findings)]
                         data["show_where"] = job.result.kind in _SHOW_WHERE
@@ -418,6 +435,39 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
             cookie = f"{cookie_name}={session}; Path=/; HttpOnly; SameSite=Strict"
             return self._send("", status=303, extra={"Location": "/", "Set-Cookie": cookie})
 
+        def _json(self, data, status: int = 200) -> None:
+            self._send(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8", status)
+
+        def _download(self, raw: str) -> None:
+            path = Path(raw)
+            if not path.is_file():
+                return self._json({"error": "файла нет"}, 404)
+            try:
+                data = path.read_bytes()
+            except OSError as exc:
+                return self._json({"error": exc.strerror or str(exc)}, 403)
+            name = path.name.replace('"', "")
+            return self._send(data, "application/octet-stream",
+                              extra={"Content-Disposition": f'attachment; filename="{name}"'})
+
+        def _file_op(self, form: dict) -> None:
+            get = lambda key: form.get(key, [""])[0]
+            op = get("op")
+            try:
+                if op == "mkdir":
+                    result = {"path": web_files.make_dir(get("path"), get("name"))}
+                elif op == "rename":
+                    result = {"path": web_files.rename(get("path"), get("name"))}
+                elif op == "delete":
+                    for raw in form.get("path", []):
+                        web_files.delete(raw)
+                    result = {}
+                else:
+                    return self._json({"error": "нет такого действия"}, 400)
+            except web_files.FileError as exc:
+                return self._json({"error": str(exc)}, 400)
+            return self._json({"ok": True, **result})
+
         def _job(self, raw: str) -> Job | None:
             return app.store.jobs.get(int(raw)) if raw.isdigit() else None
 
@@ -440,12 +490,22 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
                 return self._send("", status=303, extra={"Location": "/login"})
             if not parts:
                 return self._send(app.page_index())
-            if parts[0] == "api" and len(parts) == 2 and parts[1] in ("files", "what"):
+            if parts[0] == "api" and len(parts) == 2:
                 query = parse_qs(urlparse(self.path).query)
                 path = query.get("path", [""])[0]
-                data = (list_dir(path, query.get("hidden", ["0"])[0] == "1") if parts[1] == "files"
-                        else what_is(path))
-                return self._send(json.dumps(data, ensure_ascii=False), "application/json; charset=utf-8")
+                if parts[1] == "download":
+                    return self._download(path)
+                if parts[1] == "files":
+                    data = web_files.list_dir(path, query.get("hidden", ["0"])[0] == "1")
+                elif parts[1] == "what":
+                    data = what_is(path)
+                elif parts[1] == "view":
+                    data = web_files.read_text(path)
+                elif parts[1] == "discover":
+                    data = app.discovery.get(refresh=query.get("refresh", ["0"])[0] == "1")
+                else:
+                    return self._json({"error": "нет такого запроса"}, 404)
+                return self._json(data)
             if parts[0] == "jobs" and len(parts) >= 2 and (job := self._job(parts[1])):
                 if len(parts) == 2:
                     return self._send(app.page_job(job))
@@ -467,7 +527,7 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
             if not self._allowed():
                 return
             path = urlparse(self.path).path
-            if path not in ("/jobs", "/login"):
+            if path not in ("/jobs", "/login", "/api/fs"):
                 return self._send(app.render("missing.html.jinja"), status=404)
             length = min(int(self.headers.get("Content-Length") or 0), 64 * 1024)
             form = parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
@@ -479,13 +539,18 @@ def make_handler(app: WebApp, port: int, addresses: list[str] | None = None):
                     return self._send("", status=303, extra={"Location": "/"})
                 return self._login(form)
             if not self._authed():
+                if path == "/api/fs":
+                    return self._json({"error": "login"}, 401)
                 return self._send("", status=303, extra={"Location": "/login"})
-            query = form.get("target", [""])[0].strip()
-            if not query:
+            if path == "/api/fs":
+                return self._file_op(form)
+            queries = [q.strip() for q in form.get("target", []) if q.strip()]
+            if not queries:
                 return self._send("", status=303, extra={"Location": "/"})
             engines = form.get("engine") or None
-            job = app.store.submit(query, engines, form.get("requirements", [""])[0].strip())
-            return self._send("", status=303, extra={"Location": f"/jobs/{job.id}"})
+            jobs = [app.store.submit(q, engines, form.get("requirements", [""])[0].strip()) for q in queries]
+            # несколько целей сразу (выбрано несколько файлов) — встают в очередь, открываем первую
+            return self._send("", status=303, extra={"Location": f"/jobs/{jobs[0].id}"})
 
     return Handler
 
@@ -538,6 +603,59 @@ def _firewall_hint(port: int) -> str | None:
 
 
 PORT_TRIES = 10   # занят порт — пробуем следующие
+# окружение, которое нужно процессу под sudo: где лежат движки, kubeconfig и
+# экран пользователя (чтобы открыть ему браузер). sudo сбрасывает окружение
+_KEEP_ENV = ("PATH", "PYTHONPATH", "KUBECONFIG", "DISPLAY", "WAYLAND_DISPLAY", "XAUTHORITY",
+             "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "LANG", "LC_ALL", "TERM")
+
+
+def sudo_command(argv: list[str], environ=None) -> list[str]:
+    """Та же команда cast web, но от root: sudo env ПЕРЕМЕННЫЕ python -m cast web …
+    Через env, а не sudo --preserve-env: env — обычная команда, sudo разрешает её
+    всем, кому разрешено sudo, без отдельного права SETENV."""
+    environ = os.environ if environ is None else environ
+    keep = [f"{k}={environ[k]}" for k in _KEEP_ENV if environ.get(k)]
+    if not environ.get("KUBECONFIG"):
+        kube = Path(environ.get("HOME", str(Path.home()))) / ".kube" / "config"
+        if kube.is_file():           # у root своего kubeconfig нет — берём пользователя
+            keep.append(f"KUBECONFIG={kube}")
+    return ["sudo", "--", "env", *keep, sys.executable, "-m", "cast", *argv]
+
+
+def rerun_with_sudo(console=None, run=subprocess.call) -> int | None:
+    """Перезапустить cast web от root. None — не нужно (уже root) или нельзя (нет sudo):
+    тогда веб работает от текущего пользователя."""
+    say = console.print if console else print
+    if os.geteuid() == 0:
+        return None
+    if not shutil.which("sudo"):
+        say("sudo не найден — веб работает от текущего пользователя: host и Docker "
+            "проверить не получится.")
+        return None
+    say("host и Docker проверяются только от root — запускаю cast web через sudo "
+        "(без root: cast web --no-sudo).")
+    try:
+        return run(sudo_command(sys.argv[1:]))
+    except KeyboardInterrupt:
+        return 130
+
+
+def _open_browser(url: str) -> None:
+    """Под sudo браузер открываем тому, кто запустил sudo: браузер от root не нужен
+    (а Firefox и Chrome от root и не запускаются)."""
+    user = os.environ.get("SUDO_USER")
+    if os.geteuid() == 0 and user and user != "root":
+        gui = [f"{k}={os.environ[k]}" for k in _KEEP_ENV[3:8] if os.environ.get(k)]
+        if not gui or not shutil.which("xdg-open"):
+            return                    # нет экрана (зашли по ssh) — адрес и так напечатан
+        try:
+            subprocess.Popen(["sudo", "-u", user, "env", *gui, "xdg-open", url],
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except OSError:
+            pass
+        return
+    import webbrowser
+    webbrowser.open(url)
 
 
 def _load_auth(say, reset: bool, path=None) -> web_auth.Auth | None:
@@ -587,6 +705,11 @@ def serve(port: int = 8765, open_browser: bool = True, console=None,
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     say(f"Веб-интерфейс cast: {url}  (логин: {auth.login})")
+    if os.geteuid() == 0:
+        say("Работает от root: host и Docker проверяются. Свой кэш Trivy у root отдельный — "
+            "первая проверка скачает базу уязвимостей заново.")
+    else:
+        say("Работает без root: host и запущенные контейнеры проверить не получится.")
     if local:
         say("Доступен только с этой машины (--local). Остановить: Ctrl+C")
     else:
@@ -599,8 +722,7 @@ def serve(port: int = 8765, open_browser: bool = True, console=None,
             say(hint)
         say("Только с этой машины: cast web --local. Остановить: Ctrl+C")
     if open_browser:
-        import webbrowser
-        threading.Timer(0.5, lambda: webbrowser.open(url)).start()
+        threading.Timer(0.5, _open_browser, args=(url,)).start()
     try:
         httpd.serve_forever()
     finally:

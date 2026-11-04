@@ -1,104 +1,73 @@
 {% extends "base.html.jinja" %}
 {% block title %}cast — новая проверка{% endblock %}
 {% block body %}
-<div class="layout">
-  <!-- файлы этой машины: выбрать и проверить, как в файловом менеджере -->
-  <div class="card files" id="files">
-    <div class="row"><h2 style="margin:0">Файлы</h2><span class="spacer"></span>
-      <label class="small muted"><input type="checkbox" id="f-hidden"> скрытые</label></div>
-    <div class="bar-path">
-      <button class="btn small-btn" type="button" id="f-up" title="На папку выше">↑</button>
-      <input type="text" id="f-path" value="{{ cwd }}" spellcheck="false" title="Путь: можно вписать и нажать Enter">
+<form method="post" action="/jobs" id="scan-post" class="hidden"><input type="hidden" name="token" value="{{ token }}"></form>
+<div class="layout" id="layout">
+  <!-- проводник: файлы этой машины, как в файловом менеджере -->
+  <section class="card fm" id="fm">
+    <div class="fm-top">
+      <h2>Файлы</h2>
+      <span class="spacer"></span>
+      <button class="btn primary small-btn" type="button" id="fm-scan" title="Проверить выбранное (ничего не выбрано — открытую папку)">Сканировать</button>
+      <button class="btn ghost small-btn" type="button" id="fm-filter-btn" title="Показать только подходящие имена">
+        <svg viewBox="0 0 24 24" width="15" height="15"><circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="M15.5 15.5 21 21" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+        Фильтр</button>
+      <button class="btn ghost small-btn" type="button" id="fm-actions-btn">Действия <span id="fm-actions-arrow">▾</span></button>
     </div>
-    <ul id="f-list"></ul>
-    <div class="picked" id="f-picked">
-      <div class="muted">Щелчок — выбрать, двойной щелчок по папке — открыть,
-        правая кнопка — меню. Папка проверяется целиком (зависимости, Dockerfile и конфигурации внутри).</div>
+    <div class="fm-nav">
+      <button class="nav-btn" type="button" id="fm-back" title="Назад">‹</button>
+      <button class="nav-btn" type="button" id="fm-fwd" title="Вперёд">›</button>
+      <div class="crumbs" id="fm-crumbs" title="Щёлкните по пустому месту, чтобы вписать путь"></div>
+      <input type="text" class="crumbs-edit hidden" id="fm-path" spellcheck="false" autocomplete="off">
     </div>
-    <div class="row" style="margin-top:.5rem">
-      <button class="btn primary" type="button" id="f-scan" disabled>Сканировать</button>
-      <button class="btn" type="button" id="f-scan-dir" title="Проверить открытую папку целиком">Сканировать эту папку</button>
+    <input type="text" class="fm-filter hidden" id="fm-filter" placeholder="Фильтр по имени" spellcheck="false" autocomplete="off">
+    <div class="fm-table" id="fm-table" tabindex="0">
+      <div class="fm-head">
+        <button type="button" data-sort="name">Имя <i></i></button>
+        <button type="button" data-sort="mtime">Дата изменения <i></i></button>
+        <button type="button" data-sort="size">Размер <i></i></button>
+        <button type="button" data-sort="kind">Тип <i></i></button>
+      </div>
+      <div class="fm-body" id="fm-body"></div>
     </div>
-  </div>
+    <div class="fm-status" id="fm-status"></div>
+  </section>
 
-  <div>
-    <form class="card" method="post" action="/jobs" id="scan-form">
-      <h1>Что проверить?</h1>
-      <p class="muted small" style="margin-top:0">Как в консоли: <code>cast scan ЦЕЛЬ</code>. Что это за цель, cast поймёт сам.
-        Пути без «/» в начале — от папки, где запущен <code>cast web</code>: <code>{{ cwd }}</code>.</p>
-      <input type="hidden" name="token" value="{{ token }}">
-      <div class="row" style="flex-wrap:nowrap">
-        <input type="text" name="target" id="target" autofocus autocomplete="off"
-               placeholder="alpine:3.19, /путь/к/Dockerfile, host, cluster, https://github.com/…">
-        <button class="btn primary" type="submit">Проверить</button>
+  <div class="center">
+    <div class="card">
+      <div class="row">
+        <h1 style="margin:0">Что проверить?</h1>
+        <span class="spacer"></span>
+        <button class="btn small-btn hidden" type="button" id="fm-reopen">Показать файлы</button>
+        <button class="btn ghost small-btn" type="button" id="disc-refresh" title="Найти заново">↻ Обновить список</button>
       </div>
+      <p class="muted small" style="margin:.3rem 0 0">Нажмите на то, что хотите проверить, и проверка сразу начнётся.
+        Здесь всё, что cast нашёл на этой машине{% if not is_root %} (веб запущен без root, поэтому Docker-хост и контейнеры недоступны){% endif %}.</p>
+      <div id="disc"><p class="muted">Ищу, что можно проверить…</p></div>
 
-      <div class="cat">
-        <h3>Эта машина</h3>
-        <div class="row">
-          <span class="chip" data-fill="host">host — настройки Docker (Docker Bench)</span>
-          <span class="chip" data-fill="/">/ — вся файловая система</span>
-        </div>
-        {% if not is_root %}<p class="hint-line">host проверяется от root: запустите веб через <code>sudo cast web</code>.</p>{% endif %}
-        <p class="hint-line">«/» — все пакеты и файлы машины через Trivy rootfs: долго, до 30 минут.</p>
-      </div>
-
-      <div class="cat">
-        <h3>Docker</h3>
-        {% if suggest.containers %}
-        <p class="hint-line" style="margin:0 0 .3rem">Запущенные контейнеры — как они запущены (Docker Bench):</p>
-        <div class="row">
-          {% for c in suggest.containers %}
-          <span class="chip" data-fill="container {{ c.name }}" title="образ {{ c.image }}">▣ {{ c.name }}</span>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% if suggest.images %}
-        <p class="hint-line" style="margin:.5rem 0 .3rem">Образы на этой машине — уязвимые пакеты (Trivy):</p>
-        <div class="row">
-          {% for i in suggest.images %}<span class="chip" data-fill="{{ i }}">{{ i }}</span>{% endfor %}
-        </div>
-        {% endif %}
-        {% if not suggest.docker %}
-        <p class="hint-line">Docker не отвечает этому пользователю, поэтому списков контейнеров и образов нет.
-          {% if not is_root %}Запустите веб через <code>sudo cast web</code> или впишите имя образа сами, например
-          <span class="chip" data-fill="alpine:3.19">alpine:3.19</span>{% endif %}</p>
-        {% endif %}
-      </div>
-
-      <div class="cat">
-        <h3>Kubernetes</h3>
-        <div class="row"><span class="chip" data-fill="cluster">cluster — кластер из kubeconfig</span></div>
-        <p class="hint-line">{% if kube %}kubeconfig найден.{% else %}kubeconfig не найден (~/.kube/config) — проверка кластера не запустится.{% endif %}
-          Манифесты, Helm-чарты — файлами слева.</p>
-      </div>
-
-      <div class="cat">
-        <h3>Файлы и папки</h3>
-        <p class="hint-line" style="margin:0">Выберите слева: Dockerfile, конфигурация (Kubernetes, Terraform, Helm, docker-compose,
-          CloudFormation), папка проекта, архив образа (<code>docker save</code>), SBOM, образ диска ВМ,
-          распакованная ОС (корневая ФС). Что это за файл, cast покажет под списком.</p>
-      </div>
-
-      <div class="cat">
-        <h3>Git-репозиторий</h3>
-        <p class="hint-line" style="margin:0">Вставьте ссылку в строку выше, например
-          <span class="chip" data-fill="https://github.com/aquasecurity/trivy-ci-test">https://github.com/aquasecurity/trivy-ci-test</span></p>
-      </div>
-
-      <details style="margin-top:1rem">
-        <summary>Дополнительно</summary>
-        <p class="small muted" style="margin:.6rem 0 .3rem">Движки (если ничего не выбрано, cast выберет сам)</p>
-        <div class="row">
-          {% for e in engines %}
-          <label class="chip"><input type="checkbox" name="engine" value="{{ e.name }}"
-                 {% if not e.available %}disabled{% endif %}> {{ e.name }}</label>
-          {% endfor %}
-        </div>
-        <p class="small muted" style="margin:.8rem 0 .3rem">requirements.txt для приоритета (путь на этой машине)</p>
-        <input type="text" name="requirements" placeholder="./myapp/requirements.txt">
+      <details class="manual">
+        <summary>Вписать цель вручную, как в консоли</summary>
+        <form method="post" action="/jobs" id="scan-form" style="margin-top:.6rem">
+          <input type="hidden" name="token" value="{{ token }}">
+          <div class="row" style="flex-wrap:nowrap">
+            <input type="text" name="target" id="target" autocomplete="off"
+                   placeholder="alpine:3.19, /путь/к/Dockerfile, https://github.com/…">
+            <button class="btn primary" type="submit">Проверить</button>
+          </div>
+          <p class="muted small" style="margin:.4rem 0 0"><code>cast scan ЦЕЛЬ</code>: что это за цель, cast поймёт сам.
+            Путь без «/» в начале считается от папки, где запущен cast web: <code>{{ cwd }}</code>.</p>
+          <p class="small muted" style="margin:.8rem 0 .3rem">Движки (ничего не выбрано — cast выберет сам)</p>
+          <div class="row">
+            {% for e in engines %}
+            <label class="chip"><input type="checkbox" name="engine" value="{{ e.name }}"
+                   {% if not e.available %}disabled{% endif %}> {{ e.name }}</label>
+            {% endfor %}
+          </div>
+          <p class="small muted" style="margin:.8rem 0 .3rem">requirements.txt для приоритета (путь на этой машине)</p>
+          <input type="text" name="requirements" placeholder="/путь/к/requirements.txt">
+        </form>
       </details>
-    </form>
+    </div>
   </div>
 
   <div class="side-right">
@@ -117,7 +86,7 @@
         <div class="row"><span class="dot {{ 'on' if e.available else 'off' }}"></span>
           <strong>{{ e.name }}</strong>
           <span class="muted small">{{ e.version or "не установлен" }}</span></div>
-        {% if e.path %}<div class="mono muted small">{{ e.path }}</div>{% endif %}
+        {% if e.path %}<div class="mono muted small wrap">{{ e.path }}</div>{% endif %}
         <div class="small">{{ e.description }}</div>
         <div class="small muted">умеет: {{ e.targets | join(", ") }}</div>
       </div>
@@ -125,90 +94,436 @@
     </div>
     <div class="card small muted">
       cast запускает Trivy и Docker Bench и показывает то, что нашли они, ничего не добавляя от себя.
-      Проверки идут по одной; файлы и пути — на машине, где запущен cast web.
+      Проверки идут по одной; файлы и пути — на машине, где запущен cast web{% if is_root %} (от root){% endif %}.
     </div>
   </div>
 </div>
-<div class="ctx hidden" id="ctx"></div>
+
+<div class="menu hidden" id="menu"></div>
+<div class="menu hidden" id="submenu"></div>
+<div class="modal hidden" id="modal"><div class="modal-box" id="modal-box"></div></div>
 {% endblock %}
 {% block scripts %}
 <script>
-  const form = document.getElementById("scan-form");
-  const input = document.getElementById("target");
-  const scan = value => { input.value = value; form.submit(); };
-  document.querySelectorAll("[data-fill]").forEach(el => el.addEventListener("click", () => {
-    input.value = el.dataset.fill; input.focus();
-  }));
+const TOKEN = {{ token | tojson }}, START = {{ cwd | tojson }}, HOME = {{ home | tojson }};
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/[&<>"']/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"}[c]));
+const store = {get(k, d) { try { const v = localStorage.getItem(k); return v === null ? d : v; } catch (e) { return d; } },
+               set(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }};
 
-  // ---------------------------------------------------------------- файлы
-  const list = document.getElementById("f-list"), pathBox = document.getElementById("f-path");
-  const picked = document.getElementById("f-picked"), scanBtn = document.getElementById("f-scan");
-  const hidden = document.getElementById("f-hidden"), ctx = document.getElementById("ctx");
-  let current = pathBox.value, parent = current, selected = null;
-  const esc = s => s.replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c]));
-  const size = n => n < 1024 ? n + " Б" : n < 1048576 ? (n / 1024).toFixed(0) + " КБ" : (n / 1048576).toFixed(1) + " МБ";
+// ---------------------------------------------------------------- запуск проверки
+function scan(targets) {
+  const form = $("scan-post");
+  form.querySelectorAll("input[name=target]").forEach(x => x.remove());
+  for (const t of [].concat(targets)) {
+    const i = document.createElement("input"); i.type = "hidden"; i.name = "target"; i.value = t; form.appendChild(i);
+  }
+  form.submit();
+}
+const quote = p => /[\s'"\\]/.test(p) ? "'" + p.replace(/'/g, "'\"'\"'") + "'" : p;   // путь с пробелами — одной целью
 
-  function open(path) {
-    fetch("/api/files?path=" + encodeURIComponent(path) + "&hidden=" + (hidden.checked ? 1 : 0))
-      .then(r => r.json()).then(d => {
-        current = d.path; parent = d.parent; pathBox.value = d.path; select(null);
-        try { localStorage.setItem("cast-files", d.path); } catch (e) {}
-        list.innerHTML = d.error ? `<li class="muted">${esc(d.error)}</li>` :
-          (d.entries.length ? "" : `<li class="muted">папка пуста</li>`) +
-          d.entries.map(e => `<li data-path="${esc(e.path)}" data-dir="${e.dir ? 1 : 0}">
-            <span>${e.dir ? "📁" : "📄"}</span><span class="nm" title="${esc(e.name)}">${esc(e.name)}</span>
-            <span class="sz">${e.dir ? "" : size(e.size)}</span></li>`).join("");
-      });
-  }
-  function select(li) {
-    list.querySelectorAll("li.sel").forEach(x => x.classList.remove("sel"));
-    selected = li ? li.dataset.path : null;
-    scanBtn.disabled = !selected;
-    if (!li) return;
-    li.classList.add("sel");
-    picked.innerHTML = `<div class="mono small">${esc(selected)}</div><div class="muted">определяю…</div>`;
-    const asked = selected;
-    fetch("/api/what?path=" + encodeURIComponent(asked)).then(r => r.json()).then(w => {
-      if (asked !== selected) return;
-      picked.innerHTML = `<div class="mono small">${esc(asked)}</div>` +
-        (w.ok ? `<div>cast проверит как: <strong>${esc(w.text)}</strong></div>`
-              : `<div style="color:var(--crit)">${esc(w.text)}</div>`);
-      scanBtn.disabled = !w.ok;
-    });
-  }
-  list.addEventListener("click", e => { const li = e.target.closest("li[data-path]"); if (li) select(li); });
-  list.addEventListener("dblclick", e => {
-    const li = e.target.closest("li[data-path]"); if (!li) return;
-    li.dataset.dir === "1" ? open(li.dataset.path) : scan(li.dataset.path);
+// ---------------------------------------------------------------- окна: подтверждение, ввод, просмотр
+function modal(html, wide) {
+  $("modal-box").className = "modal-box" + (wide ? " wide" : "");
+  $("modal-box").innerHTML = html; $("modal").classList.remove("hidden");
+}
+function closeModal() { $("modal").classList.add("hidden"); $("modal-box").innerHTML = ""; }
+$("modal").addEventListener("mousedown", e => { if (e.target === $("modal")) closeModal(); });
+function ask({title, text = "", value = null, ok = "OK", danger = false}) {
+  return new Promise(resolve => {
+    modal(`<h2>${esc(title)}</h2>${text ? `<p class="muted">${text}</p>` : ""}` +
+      (value !== null ? `<input type="text" id="m-in" spellcheck="false" autocomplete="off">` : "") +
+      `<div class="row" style="justify-content:flex-end;margin-top:1rem">
+        <button class="btn" type="button" id="m-no">Отмена</button>
+        <button class="btn ${danger ? "danger" : "primary"}" type="button" id="m-ok">${esc(ok)}</button></div>`);
+    const input = $("m-in");
+    const done = v => { closeModal(); resolve(v); };
+    $("m-no").onclick = () => done(null);
+    $("m-ok").onclick = () => done(input ? input.value : true);
+    if (input) {
+      input.value = value; input.focus();
+      const dot = value.lastIndexOf(".");
+      input.setSelectionRange(0, dot > 0 ? dot : value.length);
+      input.onkeydown = e => { if (e.key === "Enter") done(input.value); };
+    } else $("m-ok").focus();
   });
-  list.addEventListener("contextmenu", e => {
-    const li = e.target.closest("li[data-path]"); if (!li) return;
-    e.preventDefault(); select(li);
-    const p = li.dataset.path, isDir = li.dataset.dir === "1";
-    ctx.innerHTML = `<button class="primary" data-act="scan">Сканировать</button>` +
-      (isDir ? `<button data-act="open">Открыть</button>` : "") +
-      `<button data-act="fill">Вставить в строку «Что проверить?»</button>` +
-      `<button data-act="copy">Копировать путь</button>`;
-    ctx.style.left = Math.min(e.clientX, innerWidth - 220) + "px";
-    ctx.style.top = Math.min(e.clientY, innerHeight - 160) + "px";
-    ctx.classList.remove("hidden");
-    ctx.onclick = ev => {
-      const act = ev.target.dataset.act; ctx.classList.add("hidden");
-      if (act === "scan") scan(p);
-      if (act === "open") open(p);
-      if (act === "fill") { input.value = p; input.focus(); }
-      if (act === "copy" && navigator.clipboard) navigator.clipboard.writeText(p);
-    };
+}
+function notice(text) {
+  modal(`<p>${esc(text)}</p><div class="row" style="justify-content:flex-end"><button class="btn primary" type="button" id="m-ok">OK</button></div>`);
+  $("m-ok").onclick = closeModal; $("m-ok").focus();
+}
+async function view(path) {
+  const r = await fetch("/api/view?path=" + encodeURIComponent(path)).then(r => r.json());
+  const lines = r.ok ? r.text.replace(/\n$/, "").split("\n") : [];
+  const w = String(lines.length).length;
+  modal(`<div class="row"><h2 class="wrap" style="flex:1">${esc(path)}</h2>
+      <button class="btn primary small-btn" type="button" id="v-scan">Сканировать</button>
+      <a class="btn small-btn" href="/api/download?path=${encodeURIComponent(path)}">Скачать</a>
+      <button class="btn small-btn" type="button" id="v-close">Закрыть</button></div>` +
+    (r.ok ? `<pre class="term view">${lines.map((l, i) => `<span class="ln">${String(i + 1).padStart(w)}</span>  ${esc(l)}`).join("\n")}</pre>`
+          : `<p class="muted">${esc(r.text)}</p>`), true);
+  $("v-close").onclick = closeModal;
+  $("v-scan").onclick = () => scan(quote(path));
+}
+async function copy(text) {
+  try { await navigator.clipboard.writeText(text); return; } catch (e) {}
+  // по http с другой машины clipboard API недоступен — старый способ
+  const t = document.createElement("textarea"); t.value = text; document.body.appendChild(t);
+  t.select(); document.execCommand("copy"); t.remove();
+}
+
+// ---------------------------------------------------------------- меню
+const menu = $("menu"), submenu = $("submenu");
+function hideMenus() { menu.classList.add("hidden"); submenu.classList.add("hidden"); $("fm-actions-arrow").textContent = "▾"; }
+function place(el, x, y) {
+  el.classList.remove("hidden");
+  const r = el.getBoundingClientRect();
+  el.style.left = Math.max(4, Math.min(x, innerWidth - r.width - 8)) + "px";
+  el.style.top = Math.max(4, Math.min(y, innerHeight - r.height - 8)) + "px";
+}
+// items: [{label, act, cls, off, sub:[...], check}] или "-" — разделитель
+function showMenu(el, items, x, y) {
+  el.innerHTML = items.map((it, i) => it === "-" ? `<hr>` :
+    `<button type="button" data-i="${i}" class="${it.cls || ""}${it.sub ? " has-sub" : ""}" ${it.off ? "disabled" : ""}>` +
+    `<span class="ck">${it.check ? "✓" : ""}</span>${esc(it.label)}${it.sub ? `<span class="arr">›</span>` : ""}</button>`).join("");
+  el.onclick = e => {
+    const b = e.target.closest("button[data-i]"); if (!b || b.disabled) return;
+    const it = items[b.dataset.i];
+    if (it.sub) return openSub(b, it.sub);
+    hideMenus(); it.act();
+  };
+  el.onmouseover = e => {
+    const b = e.target.closest("button[data-i]"); if (!b || el !== menu) return;
+    const it = items[b.dataset.i];
+    if (it.sub && !b.disabled) openSub(b, it.sub); else submenu.classList.add("hidden");
+  };
+  place(el, x, y);
+}
+function openSub(button, items) {
+  const r = button.getBoundingClientRect();
+  showMenu(submenu, items, r.right - 2, r.top - 4);
+}
+document.addEventListener("mousedown", e => {
+  if (!menu.contains(e.target) && !submenu.contains(e.target) && !e.target.closest("#fm-actions-btn")) hideMenus();
+});
+document.addEventListener("keydown", e => { if (e.key === "Escape") { hideMenus(); closeModal(); } });
+addEventListener("blur", hideMenus); addEventListener("resize", hideMenus);
+
+// ---------------------------------------------------------------- проводник
+const fm = {cur: "", parent: "", entries: [], sel: new Set(), anchor: null, hist: [], pos: -1,
+            sort: store.get("cast-fm-sort", "name"), dir: +store.get("cast-fm-dir", 1),
+            hidden: store.get("cast-fm-hidden", "0") === "1", filter: ""};
+const body = $("fm-body");
+const fmtSize = n => n < 1024 ? n + " Б" : n < 1048576 ? (n / 1024).toFixed(1).replace(".0", "") + " КБ"
+                   : n < 1073741824 ? (n / 1048576).toFixed(1) + " МБ" : (n / 1073741824).toFixed(1) + " ГБ";
+const fmtDate = t => t ? new Date(t * 1000).toLocaleString("ru-RU", {day: "2-digit", month: "2-digit", year: "numeric",
+                                                                        hour: "2-digit", minute: "2-digit"}) : "";
+const ICON = {
+  dir: `<svg viewBox="0 0 24 24" class="ic dir"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h4.6l2 2h8.4A1.5 1.5 0 0 1 21 8.5v9A1.5 1.5 0 0 1 19.5 19h-15A1.5 1.5 0 0 1 3 17.5z"/></svg>`,
+  file: `<svg viewBox="0 0 24 24" class="ic file"><path d="M6 3h8l5 5v12a1 1 0 0 1-1 1H6a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M14 3v5h5" class="fold"/></svg>`,
+  link: `<svg viewBox="0 0 24 24" class="ic link"><path d="M4 18c0-6 4-9 10-9V5l7 6-7 6v-4c-4 0-7 1-10 5z"/></svg>`,
+};
+
+async function go(path, push = true) {
+  const d = await fetch("/api/files?path=" + encodeURIComponent(path) + "&hidden=" + (fm.hidden ? 1 : 0)).then(r => r.json());
+  if (d.error === "login") return location.reload();
+  const changed = d.path !== fm.cur;
+  fm.cur = d.path; fm.parent = d.parent; fm.entries = d.entries; fm.error = d.error;
+  if (changed) { fm.sel.clear(); fm.anchor = null; }
+  else fm.sel = new Set([...fm.sel].filter(p => d.entries.some(e => e.path === p)));
+  if (push && changed) { fm.hist = fm.hist.slice(0, fm.pos + 1); fm.hist.push(d.path); fm.pos = fm.hist.length - 1; }
+  store.set("cast-files", d.path);
+  crumbs(); render(); status();
+}
+const refresh = () => go(fm.cur, false);
+
+function crumbs() {
+  const parts = fm.cur.split("/").filter(Boolean);
+  let acc = "", html = `<button type="button" data-go="/">/</button>`;
+  parts.forEach((p, i) => {
+    acc += "/" + p;
+    html += `<span class="sep">›</span><button type="button" data-go="${esc(acc)}" class="${i === parts.length - 1 ? "last" : ""}">${esc(p)}</button>`;
   });
-  document.addEventListener("click", e => { if (!ctx.contains(e.target)) ctx.classList.add("hidden"); });
-  document.addEventListener("keydown", e => { if (e.key === "Escape") ctx.classList.add("hidden"); });
-  scanBtn.addEventListener("click", () => selected && scan(selected));
-  document.getElementById("f-scan-dir").addEventListener("click", () => scan(current));
-  document.getElementById("f-up").addEventListener("click", () => open(parent));
-  pathBox.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); open(pathBox.value); } });
-  hidden.addEventListener("change", () => open(current));
-  let start = current;
-  try { start = localStorage.getItem("cast-files") || current; } catch (e) {}
-  open(start);
+  $("fm-crumbs").innerHTML = html;
+  $("fm-crumbs").scrollLeft = $("fm-crumbs").scrollWidth;     // длинный путь — видно его конец
+  $("fm-back").disabled = fm.pos <= 0; $("fm-fwd").disabled = fm.pos >= fm.hist.length - 1;
+}
+function shown() {
+  const q = fm.filter.toLowerCase();
+  const list = fm.entries.filter(e => !q || e.name.toLowerCase().includes(q));
+  const k = fm.sort, dir = fm.dir;
+  return list.sort((a, b) => (b.dir - a.dir) ||
+    (k === "name" ? a.name.localeCompare(b.name, "ru", {numeric: true, sensitivity: "base"}) * dir
+                  : ((a[k] > b[k]) - (a[k] < b[k])) * dir || a.name.localeCompare(b.name)));
+}
+function render() {
+  document.querySelectorAll(".fm-head button").forEach(b =>
+    b.querySelector("i").textContent = b.dataset.sort === fm.sort ? (fm.dir > 0 ? "▲" : "▼") : "");
+  const list = shown();
+  let html = fm.cur !== "/" ? `<div class="fm-row up" data-up="1">${ICON.dir}<span class="nm">..</span><span></span><span></span><span></span></div>` : "";
+  if (fm.error) html += `<div class="fm-empty">${esc(fm.error)}</div>`;
+  else if (!list.length) html += `<div class="fm-empty">${fm.filter ? "Под фильтр ничего не подходит" : "Папка пуста"}</div>`;
+  html += list.map(e => `<div class="fm-row${fm.sel.has(e.path) ? " sel" : ""}" data-path="${esc(e.path)}">` +
+    `${e.dir ? ICON.dir : e.link ? ICON.link : ICON.file}<span class="nm" title="${esc(e.name)}">${esc(e.name)}</span>` +
+    `<span class="dt">${fmtDate(e.mtime)}</span><span class="sz">${e.dir ? "- -" : fmtSize(e.size)}</span>` +
+    `<span class="kd">${esc(e.kind)}</span></div>`).join("");
+  body.innerHTML = html;
+}
+const entry = p => fm.entries.find(e => e.path === p);
+const selected = () => fm.entries.filter(e => fm.sel.has(e.path));
+let whatAsked = "";
+function status() {
+  const sel = selected(), st = $("fm-status");
+  const total = `${fm.entries.length} ${plural(fm.entries.length, "объект", "объекта", "объектов")}`;
+  $("fm-scan").textContent = sel.length > 1 ? `Сканировать (${sel.length})` : sel.length ? "Сканировать" : "Сканировать папку";
+  if (sel.length !== 1) { st.innerHTML = total + (sel.length ? ` · выбрано: ${sel.length}` : ""); whatAsked = ""; return; }
+  const p = sel[0].path; whatAsked = p;
+  st.innerHTML = `${total} · <span class="muted">определяю…</span>`;
+  fetch("/api/what?path=" + encodeURIComponent(p)).then(r => r.json()).then(w => {
+    if (whatAsked !== p) return;
+    st.innerHTML = `${total} · ` + (w.ok ? `cast проверит как: <strong>${esc(w.text)}</strong>`
+                                        : `<span class="bad">${esc(w.text)}</span>`);
+  });
+}
+const plural = (n, one, few, many) => n % 10 === 1 && n % 100 !== 11 ? one : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 10 || n % 100 >= 20) ? few : many;
+function selectRow(path, e) {
+  const list = shown().map(x => x.path);
+  if (e && e.shiftKey && fm.anchor && list.includes(fm.anchor)) {
+    const [a, b] = [list.indexOf(fm.anchor), list.indexOf(path)].sort((x, y) => x - y);
+    if (!(e.ctrlKey || e.metaKey)) fm.sel.clear();
+    list.slice(a, b + 1).forEach(p => fm.sel.add(p));
+  } else if (e && (e.ctrlKey || e.metaKey)) {
+    fm.sel.has(path) ? fm.sel.delete(path) : fm.sel.add(path); fm.anchor = path;
+  } else { fm.sel = new Set([path]); fm.anchor = path; }
+  render(); status();
+}
+
+// действия
+function openEntry(e) { e.dir ? go(e.path) : view(e.path); }
+function scanSelected() {
+  const sel = selected();
+  scan(sel.length ? sel.map(e => quote(e.path)) : [quote(fm.cur)]);
+}
+async function renameEntry(e) {
+  const name = await ask({title: "Переименовать", value: e.name, ok: "Переименовать"});
+  if (name === null || name === e.name || !name.trim()) return;
+  const r = await post({op: "rename", path: e.path, name});
+  if (r.ok) { fm.sel = new Set([r.path]); refresh(); }
+}
+async function deleteEntries(list) {
+  if (!list.length) return;
+  const what = list.length === 1
+    ? `${list[0].dir ? "папку" : "файл"} <strong>${esc(list[0].name)}</strong>${list[0].dir ? " со всем содержимым" : ""}`
+    : `${list.length} ${plural(list.length, "объект", "объекта", "объектов")}: ${list.slice(0, 5).map(e => `<strong>${esc(e.name)}</strong>`).join(", ")}${list.length > 5 ? "…" : ""}`;
+  const ok = await ask({title: "Удалить?", text: `Удалить ${what}? Корзины нет — вернуть не получится.`, ok: "Удалить", danger: true});
+  if (!ok) return;
+  const r = await post({op: "delete", path: list.map(e => e.path)});
+  if (r.ok) refresh(); else refresh();
+}
+async function newFolder() {
+  const name = await ask({title: "Новая папка", text: `В ${esc(fm.cur)}`, value: "Новая папка", ok: "Создать"});
+  if (name === null || !name.trim()) return;
+  const r = await post({op: "mkdir", path: fm.cur, name});
+  if (r.ok) { fm.sel = new Set([r.path]); refresh(); }
+}
+async function post(fields) {
+  const data = new URLSearchParams({token: TOKEN});
+  for (const [k, v] of Object.entries(fields)) [].concat(v).forEach(x => data.append(k, x));
+  const r = await fetch("/api/fs", {method: "POST", body: data}).then(r => r.json()).catch(() => ({error: "сервер не ответил"}));
+  if (r.error === "login") location.reload();
+  else if (r.error) notice("Не получилось: " + r.error);
+  return r;
+}
+function toggleHidden() { fm.hidden = !fm.hidden; store.set("cast-fm-hidden", fm.hidden ? "1" : "0"); refresh(); }
+function selectAll() { fm.sel = new Set(shown().map(e => e.path)); render(); status(); }
+function setClosed(closed) {
+  $("layout").classList.toggle("fm-closed", closed); $("fm-reopen").classList.toggle("hidden", !closed);
+  store.set("cast-fm-closed", closed ? "1" : "0");
+}
+const copyPaths = list => copy(list.map(e => e.path).join("\n"));
+const openWith = e => [
+  {label: "Просмотр в браузере", act: () => view(e.path)},
+  {label: "Скачать", act: () => { location.href = "/api/download?path=" + encodeURIComponent(e.path); }},
+];
+const common = () => ["-", {label: "Обновить", act: refresh}, {label: "Новая папка", act: newFolder}];
+
+function fileMenu(e) {
+  return [{label: "Сканировать", act: scanSelected, cls: "accent"},
+          {label: "Открыть", act: () => view(e.path)},
+          {label: "Открыть с помощью…", sub: openWith(e)},
+          {label: "Копировать путь", act: () => copyPaths(selected())},
+          {label: "Переименовать", act: () => renameEntry(e), off: fm.sel.size !== 1},
+          {label: "Удалить", act: () => deleteEntries(selected()), cls: "danger"}, ...common()];
+}
+function folderMenu(e) {
+  return [{label: "Копировать путь", act: () => copyPaths(selected())},
+          {label: "Переименовать", act: () => renameEntry(e), off: fm.sel.size !== 1},
+          {label: "Удалить", act: () => deleteEntries(selected()), cls: "danger"}, ...common()];
+}
+function actionsMenu() {
+  const sel = selected(), one = sel.length === 1 ? sel[0] : null;
+  return [{label: "Открыть", act: () => openEntry(one), off: !one},
+          {label: "Открыть с помощью…", sub: one && !one.dir ? openWith(one) : null, off: !one || one.dir},
+          {label: "Копировать путь", act: () => copyPaths(sel), off: !sel.length},
+          {label: "Переименовать", act: () => renameEntry(one), off: !one},
+          {label: "Удалить", act: () => deleteEntries(sel), off: !sel.length, cls: sel.length ? "danger" : ""},
+          "-",
+          {label: "Обновить", act: refresh},
+          {label: "Новая папка", act: newFolder},
+          {label: "Показать скрытые файлы", act: toggleHidden, check: fm.hidden},
+          {label: "Выбрать всё", act: selectAll},
+          "-",
+          {label: "Закрыть", act: () => setClosed(true), cls: "danger"}];
+}
+// у подменю «Открыть с помощью…» в «Действиях» пунктов нет, пока не выбран файл
+const fixSub = items => items.map(it => it !== "-" && it.sub === null ? {...it, sub: undefined, off: true} : it);
+
+body.addEventListener("click", e => {
+  const row = e.target.closest(".fm-row"); if (!row) { fm.sel.clear(); render(); status(); return; }
+  if (row.dataset.up) return;
+  selectRow(row.dataset.path, e);
+});
+body.addEventListener("dblclick", e => {
+  const row = e.target.closest(".fm-row"); if (!row) return;
+  if (row.dataset.up) return go(fm.parent);
+  const it = entry(row.dataset.path); it.dir ? go(it.path) : scan(quote(it.path));
+});
+body.addEventListener("contextmenu", e => {
+  e.preventDefault(); hideMenus();
+  const row = e.target.closest(".fm-row[data-path]");
+  if (!row) return showMenu(menu, [{label: "Обновить", act: refresh}, {label: "Новая папка", act: newFolder},
+                                   {label: "Показать скрытые файлы", act: toggleHidden, check: fm.hidden}], e.clientX, e.clientY);
+  if (!fm.sel.has(row.dataset.path)) selectRow(row.dataset.path);
+  const it = entry(row.dataset.path);
+  showMenu(menu, it.dir ? folderMenu(it) : fileMenu(it), e.clientX, e.clientY);
+});
+$("fm-table").addEventListener("keydown", e => {
+  if (e.target !== $("fm-table")) return;
+  const sel = selected();
+  if (e.key === "Delete") deleteEntries(sel);
+  else if (e.key === "F2" && sel.length === 1) renameEntry(sel[0]);
+  else if (e.key === "Enter" && sel.length === 1) openEntry(sel[0]);
+  else if (e.key === "Backspace") go(fm.parent);
+  else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "a") { e.preventDefault(); selectAll(); }
+  else return;
+  e.preventDefault();
+});
+$("fm-actions-btn").addEventListener("click", e => {
+  if (!menu.classList.contains("hidden")) return hideMenus();
+  const r = e.currentTarget.getBoundingClientRect();
+  showMenu(menu, fixSub(actionsMenu()), r.right - 230, r.bottom + 4);
+  $("fm-actions-arrow").textContent = "▴";
+});
+$("fm-scan").addEventListener("click", scanSelected);
+$("fm-filter-btn").addEventListener("click", () => {
+  const f = $("fm-filter"), on = f.classList.toggle("hidden");
+  $("fm-filter-btn").classList.toggle("on", !on);
+  if (!on) f.focus(); else { f.value = ""; fm.filter = ""; render(); }
+});
+$("fm-filter").addEventListener("input", e => { fm.filter = e.target.value; render(); });
+document.querySelectorAll(".fm-head button").forEach(b => b.addEventListener("click", () => {
+  fm.dir = fm.sort === b.dataset.sort ? -fm.dir : 1; fm.sort = b.dataset.sort;
+  store.set("cast-fm-sort", fm.sort); store.set("cast-fm-dir", fm.dir); render();
+}));
+$("fm-back").addEventListener("click", () => { if (fm.pos > 0) go(fm.hist[--fm.pos], false); });
+$("fm-fwd").addEventListener("click", () => { if (fm.pos < fm.hist.length - 1) go(fm.hist[++fm.pos], false); });
+// путь: щелчок по сегменту — перейти, по пустому месту — вписать путь целиком
+const crumbBox = $("fm-crumbs"), pathBox = $("fm-path");
+crumbBox.addEventListener("click", e => {
+  const b = e.target.closest("button[data-go]");
+  if (b) return go(b.dataset.go);
+  crumbBox.classList.add("hidden"); pathBox.classList.remove("hidden");
+  pathBox.value = fm.cur; pathBox.focus(); pathBox.setSelectionRange(fm.cur.length, fm.cur.length);
+});
+const endEdit = () => { pathBox.classList.add("hidden"); crumbBox.classList.remove("hidden"); };
+pathBox.addEventListener("keydown", e => {
+  if (e.key === "Enter") { e.preventDefault(); const v = pathBox.value.trim(); endEdit(); if (v) go(v.replace(/^~(?=\/|$)/, HOME)); }
+  if (e.key === "Escape") endEdit();
+});
+pathBox.addEventListener("blur", endEdit);
+$("fm-reopen").addEventListener("click", () => setClosed(false));
+setClosed(store.get("cast-fm-closed", "0") === "1");
+go(store.get("cast-files", START));
+
+// ---------------------------------------------------------------- что проверить: всё, что нашлось
+const GROUPS = [
+  ["dockerfile", "Dockerfile", "ошибки в сборке образа"],
+  ["Kubernetes", "Манифесты Kubernetes", "ошибки конфигурации"],
+  ["Helm", "Helm-чарты", "чарт целиком"],
+  ["Terraform", "Terraform", "ошибки конфигурации"],
+  ["CloudFormation", "CloudFormation", "ошибки конфигурации"],
+  ["docker-compose", "docker-compose", "в Trivy нет проверок для compose — отчёт будет пустым"],
+  ["project", "Папки проектов", "уязвимые библиотеки по файлам зависимостей и секреты"],
+  ["git", "Git-репозитории на этой машине", "папка целиком"],
+  ["archive", "Архивы образов (docker save)", "уязвимые пакеты"],
+  ["sbom", "SBOM", "уязвимые пакеты из списка"],
+  ["vm", "Образы дисков ВМ", "уязвимые пакеты"],
+  ["rootfs", "Распакованные ОС (корневая ФС)", "уязвимые пакеты"],
+];
+const SHOW = 6;
+function item(target, title, sub, extra = "", long = false) {
+  return `<button type="button" class="target" data-target="${esc(target)}"${long ? ` data-long="1"` : ""}>` +
+    `<span class="t-title">${title}</span>${sub ? `<span class="t-sub">${sub}</span>` : ""}${extra}</button>`;
+}
+function block(key, title, about, items) {
+  if (!items.length) return "";
+  const more = items.length > SHOW;
+  return `<div class="mod" data-mod="${key}"><div class="mod-head"><h3>${esc(title)}</h3><span class="count">${items.length}</span>` +
+    `<span class="muted small">${esc(about)}</span></div><div class="targets">${items.map((x, i) =>
+      i >= SHOW ? x.replace('class="target"', 'class="target extra hidden"') : x).join("")}</div>` +
+    (more ? `<button type="button" class="link-btn" data-more>показать ещё ${items.length - SHOW}</button>` : "") + `</div>`;
+}
+const short = p => p.startsWith(HOME + "/") ? "~" + p.slice(HOME.length) : p;
+function fileItem(p) {
+  const i = p.lastIndexOf("/");
+  return item(quote(p), esc(p.slice(i + 1)), esc(short(p.slice(0, i) || "/")));
+}
+function renderDisc(d) {
+  const dk = d.docker || {containers: [], images: []}, f = d.files || {};
+  let html = `<div class="mod-grid">`;
+  html += block("host", "Эта машина", "", [
+    item("host", "Docker-хост", "настройки Docker и демона (Docker Bench)"),
+    item("/", "Вся файловая система «/»", "все пакеты машины (Trivy rootfs) — долго, до 30 минут", "", true)]);
+  if (dk.docker) {
+    html += block("containers", "Запущенные контейнеры", "как запущен контейнер и что в его образе",
+      dk.containers.map(c => item("container " + c.name, esc(c.name), esc(c.image) + " · " + esc(c.status))));
+    html += block("images", "Образы Docker", "уязвимые пакеты в образе",
+      dk.images.map(im => item("image " + im.ref, esc(im.ref), esc(im.size))));
+    if (!dk.containers.length && !dk.images.length)
+      html += `<div class="mod"><div class="mod-head"><h3>Docker</h3></div><p class="muted small">Ни контейнеров, ни образов нет.</p></div>`;
+  } else {
+    html += `<div class="mod"><div class="mod-head"><h3>Docker</h3></div><p class="muted small">Docker не отвечает{% if not is_root %} — веб запущен без root: перезапустите его просто <code>cast web</code> (без --no-sudo){% endif %}. Списка контейнеров и образов нет.</p></div>`;
+  }
+  html += d.kube ? block("cluster", "Kubernetes", "ресурсы кластера и образы в нём — несколько минут",
+      [item("cluster", "Кластер" + (d.context ? " " + esc(d.context) : ""), "текущий контекст kubeconfig")])
+    : `<div class="mod"><div class="mod-head"><h3>Kubernetes</h3></div><p class="muted small">kubeconfig не найден (~/.kube/config) — кластер проверить не получится.</p></div>`;
+  for (const [key, title, about] of GROUPS) html += block(key, title, about, (f[key] || []).map(fileItem));
+  html += block("repo", "Git-репозиторий по ссылке", "Trivy скачает его сам",
+    [item("https://github.com/aquasecurity/trivy-ci-test", "github.com/aquasecurity/trivy-ci-test", "пример; свою ссылку — «Вписать цель вручную»")]);
+  html += `</div><p class="muted small" style="margin:.8rem 0 0">Файлы искал в ${(d.roots || []).map(r => `<code>${esc(short(r))}</code>`).join(" и ")}` +
+    ` за ${d.seconds} с${d.cut ? " (папок слишком много — обошёл не всё)" : ""}. Остальное — в проводнике слева.</p>`;
+  $("disc").innerHTML = html;
+}
+$("disc").addEventListener("click", async e => {
+  const more = e.target.closest("[data-more]");
+  if (more) { more.parentElement.querySelectorAll(".extra").forEach(x => x.classList.remove("hidden")); more.remove(); return; }
+  const t = e.target.closest(".target"); if (!t) return;
+  if (t.dataset.long && !await ask({title: "Проверить всю машину?", ok: "Начать",
+      text: "Trivy пройдёт по всей файловой системе. Это долго — до 30 минут; всё это время другие проверки ждут в очереди."})) return;
+  scan(t.dataset.target);
+});
+async function discover(refresh) {
+  if (refresh) $("disc").innerHTML = `<p class="muted">Ищу заново…</p>`;
+  let d = await fetch("/api/discover" + (refresh ? "?refresh=1" : "")).then(r => r.json()).catch(() => null);
+  while (d && d.running) {
+    if (d.files) renderDisc(d);
+    await new Promise(r => setTimeout(r, 500));
+    d = await fetch("/api/discover").then(r => r.json()).catch(() => null);
+  }
+  if (d && d.error === "login") return location.reload();
+  if (d) renderDisc(d);
+}
+$("disc-refresh").addEventListener("click", () => discover(true));
+discover(false);
 </script>
 {% endblock %}
