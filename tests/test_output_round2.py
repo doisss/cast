@@ -122,6 +122,27 @@ def test_whole_file_high_goes_before_line_medium():
     assert out.index("весь файл") < out.index("Dockerfile:2")
 
 
+def test_whole_file_goes_first_at_equal_severity():
+    """04.11: при равной серьёзности «весь файл» — первым."""
+    data = json.loads(DOCKERFILE)
+    data["Results"][0]["Misconfigurations"][1]["Severity"] = "HIGH"
+    scanner = _FakeDockerfile()
+    scanner.scan_target = lambda target: scanner._parse(json.dumps(data))
+    out = _render(run_scan(Target("dockerfile", "Dockerfile"), scanners=[scanner]), 140)
+    assert out.index("весь файл") < out.index("Dockerfile:2")
+
+
+def test_hint_has_no_labels_existing_dim_new_green():
+    from cast.report.fix_hint import hint_lines
+    fix = console_report.Text()
+    console_report._append_hint(fix, hint_lines(
+        "KSV-0014", "Change 'containers[].securityContext.readOnlyRootFilesystem' to 'true'.", MSG, CODE_14_17))
+    assert "уже есть" not in fix.plain and "добавить" not in fix.plain
+    styles = {fix.plain[span.start:span.end].strip(): span.style for span in fix.spans}
+    assert styles["securityContext:"] == "dim"
+    assert styles["readOnlyRootFilesystem: true"] == "green"
+
+
 CODE_14_17 = [{"number": 14, "content": "        - name: web", "is_cause": True},
               {"number": 15, "content": "          image: nginx:1.25", "is_cause": True},
               {"number": 16, "content": "          securityContext:", "is_cause": True},

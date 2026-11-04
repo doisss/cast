@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from cast.pipeline import ScanResult
-from cast.report.fix_hint import ADD, CHANGE, EXISTS, hint_lines
+from cast.report.fix_hint import CHANGE, EXISTS, hint_lines
 from cast.report.sections import STATUS_HELP, Section, build_sections, container_image_note
 
 _SEVERITY_STYLE = {
@@ -176,10 +176,10 @@ def _group_by_place(findings) -> list[tuple[str, list]]:
     for f in findings:
         groups.setdefault(f.location or "—", []).append(f)
     order = list(groups)
-    # сначала самые серьёзные; «весь файл» («нет USER», «нет HEALTHCHECK») — среди них же,
-    # а при равной серьёзности — после мест со строками
+    # сначала самые серьёзные; при равной серьёзности первым — «весь файл» (правило
+    # про файл целиком: «нет USER», «нет HEALTHCHECK»), потом места со строками
     return sorted(groups.items(), key=lambda kv: (
-        -max(f.severity.rank for f in kv[1]), not _has_lines(kv[0]), -len(kv[1]), order.index(kv[0])))
+        -max(f.severity.rank for f in kv[1]), _has_lines(kv[0]), -len(kv[1]), order.index(kv[0])))
 
 
 def _has_lines(place: str) -> bool:
@@ -217,19 +217,12 @@ def _code_text(lines: list[dict]) -> Text:
 
 
 def _append_hint(fix: Text, lines) -> None:
-    """Кусок YAML под советом: серым — что уже есть в файле, зелёным — что дописать."""
-    first_add = True
+    """Кусок YAML под советом: серым — что уже есть в файле, зелёным — что дописать.
+    Если значение в файле другое, рядом — какое там сейчас."""
     for text, state, old in lines:
-        if state == EXISTS:
-            fix.append(f"\n  {text}", style="dim")
-            fix.append("  (уже есть)", style="dim italic")
-            continue
-        fix.append(f"\n  {text}", style="green")
+        fix.append(f"\n  {text}", style="dim" if state == EXISTS else "green")
         if state == CHANGE:
             fix.append(f"  ← сейчас {old}", style="yellow")
-        elif state == ADD and first_add:
-            fix.append("  ← добавить", style="yellow")
-            first_add = False
 
 
 def _print_config_groups(console: Console, findings, top: int) -> None:
