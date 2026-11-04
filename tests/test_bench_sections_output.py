@@ -57,8 +57,9 @@ def test_sections_headers_pass_line_and_marks():
     assert "▌ 1. Хост" in out and "▌ 2. Настройки демона Docker" in out and "▌ 7. Docker Swarm" in out
     assert out.index("▌ 1.") < out.index("▌ 2.") < out.index("▌ 7.")
     assert "(ручная)" in out and "(устаревшая)" in out and "Scored" not in out
-    assert "PASS: 2.3" in out and "PASS: 7.1" in out
-    assert "check 2.3" not in out           # PASS не занимает строк таблицы
+    assert "check 2.3" in out and "check 7.1" in out   # PASS — строками таблицы
+    assert out.index("check 2.2") < out.index("check 2.3")   # внизу раздела, после WARN
+    assert "PASS: 2.3" not in out
     assert "К чему относится" not in out
 
 
@@ -69,9 +70,10 @@ def test_each_object_on_its_own_line():
 
 
 def test_top_limits_rows_per_section_and_says_so():
-    out = _out([_f(f"5.{i}", "WARN", section="5") for i in range(1, 6)], top=2)
+    out = _out([_f(f"5.{i}", "WARN", section="5") for i in range(1, 6)] + [_f("5.9", "PASS", section="5")], top=2)
     assert "check 5.2" in out and "check 5.3" not in out
     assert "скрыто --top: 3" in out
+    assert "PASS: 5.9" in out and "check 5.9" not in out   # с --top PASS — только номерами
 
 
 def test_score_is_explained_with_docker_bench_numbers():

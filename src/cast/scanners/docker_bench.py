@@ -73,11 +73,7 @@ def _default_dirs() -> list[Path]:
     return dirs
 
 
-def locate_script() -> Path:
-    """Ищет docker-bench-security.sh. Порядок: переменная CAST_DOCKER_BENCH_DIR,
-    затем PATH (симлинк разворачивается до реального файла), затем типовые папки.
-    Скрипт подгружает свои функции по относительному пути (LIBEXEC="."), поэтому
-    запускать его нужно из его собственной папки — потому нам нужен именно реальный путь."""
+def _candidates() -> list[Path]:
     candidates: list[Path] = []
     env_dir = os.environ.get(_ENV_DIR)
     if env_dir:
@@ -87,10 +83,26 @@ def locate_script() -> Path:
     except BinaryNotFoundError:
         pass
     candidates.extend(d / _SCRIPT_NAME for d in _default_dirs())
+    return candidates
 
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
+
+def all_scripts() -> list[Path]:
+    """Все найденные копии Docker Bench по порядку поиска, без повторов."""
+    found: list[Path] = []
+    for candidate in _candidates():
+        if candidate.is_file() and candidate.resolve() not in {f.resolve() for f in found}:
+            found.append(candidate)
+    return found
+
+
+def locate_script() -> Path:
+    """Ищет docker-bench-security.sh. Порядок: переменная CAST_DOCKER_BENCH_DIR,
+    затем PATH (симлинк разворачивается до реального файла), затем типовые папки.
+    Скрипт подгружает свои функции по относительному пути (LIBEXEC="."), поэтому
+    запускать его нужно из его собственной папки — потому нам нужен именно реальный путь."""
+    found = all_scripts()
+    if found:
+        return found[0]
     raise BinaryNotFoundError(
         _SCRIPT_NAME,
         f"{DOCKER_BENCH_INSTALL_HINT} (git clone, затем укажите папку в переменной "
@@ -203,6 +215,9 @@ class DockerBenchScanner(Scanner):
             return str(locate_script().parent)
         except BinaryNotFoundError:
             return None
+
+    def other_copies(self) -> list[tuple[str, str | None]]:
+        return [(str(script.parent), read_version(script)) for script in all_scripts()[1:]]
 
     remediation: dict[str, tuple[str, str]] = {}
     summary: dict[str, int] = {}

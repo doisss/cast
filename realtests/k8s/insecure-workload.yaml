@@ -1,0 +1,37 @@
+# Намеренно небезопасная нагрузка для проверки `cast scan cluster`.
+# Не запускать нигде, кроме тестового кластера kind cast-test.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: cast-demo
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: insecure-web
+  namespace: cast-demo
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: insecure-web}
+  template:
+    metadata:
+      labels: {app: insecure-web}
+    spec:
+      hostNetwork: true
+      containers:
+        - name: web
+          image: alpine:3.18.0         # маленький (~3 МБ) и старый образ: будут уязвимости
+          command: ["sleep", "infinity"]
+          securityContext:
+            privileged: true           # привилегированный контейнер
+            runAsUser: 0               # от root
+            allowPrivilegeEscalation: true
+          # нет resources.limits — без ограничений по памяти и CPU
+          volumeMounts:
+            - name: host-root
+              mountPath: /host
+      volumes:
+        - name: host-root
+          hostPath:
+            path: /                    # весь диск узла внутри контейнера

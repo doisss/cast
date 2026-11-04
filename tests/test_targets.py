@@ -54,7 +54,7 @@ def test_plain_name_is_always_image(docker, tmp_path, monkeypatch):
 def test_missing_local_image_gets_note(docker):
     t = resolve_target(["nginx:latest"])
     assert t.kind == "image"
-    assert any("нет на этой машине" in n for n in t.notes)
+    assert any("нет на текущей машине" in n for n in t.notes)
     assert resolve_target(["alpine:3.19"]).notes == []
 
 

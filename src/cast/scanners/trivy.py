@@ -23,7 +23,7 @@ from pathlib import Path
 from cast.models import Finding, Severity
 from cast.scanners.base import Scanner, ScannerError
 from cast.targets import is_dockerfile_name
-from cast.utils import find_binary
+from cast.utils import find_all_binaries, find_binary
 
 TRIVY_INSTALL_HINT = (
     "https://aquasecurity.github.io/trivy/latest/getting-started/installation/"
@@ -301,14 +301,17 @@ class TrivyScanner(Scanner):
         except Exception:
             return False
 
-    def version(self) -> str | None:
+    def version(self, binary: str | None = None) -> str | None:
         try:
-            binary = find_binary("trivy", TRIVY_INSTALL_HINT)
+            binary = binary or find_binary("trivy", TRIVY_INSTALL_HINT)
             out = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
         except Exception:
             return None
         match = re.search(r"Version:\s*(\S+)", out.stdout or "")
         return match.group(1) if match else None
+
+    def other_copies(self) -> list[tuple[str, str | None]]:
+        return [(path, self.version(path)) for path in find_all_binaries("trivy")[1:]]
 
     def path(self) -> str | None:
         try:
@@ -507,6 +510,7 @@ class TrivyScanner(Scanner):
                         location=where,
                         code_lines=code,
                         remediation=mis.get("Resolution") or None,
+                        message=mis.get("Message") or None,
                         url=mis.get("PrimaryURL"),
                     )
                 )

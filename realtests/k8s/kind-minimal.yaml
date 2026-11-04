@@ -1,0 +1,6 @@
+# Самый маленький кластер kind для realtests: один узел control-plane, без рабочих узлов.
+# Ничего лишнего (ни ingress, ни metrics-server) kind по умолчанию не ставит.
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+nodes:
+  - role: control-plane

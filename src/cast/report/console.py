@@ -9,13 +9,16 @@
 
 from __future__ import annotations
 
+import re
+from difflib import SequenceMatcher
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
 from cast.pipeline import ScanResult
-from cast.report.fix_hint import yaml_hint
+from cast.report.fix_hint import ADD, CHANGE, EXISTS, hint_lines
 from cast.report.sections import STATUS_HELP, Section, build_sections, container_image_note
 
 _SEVERITY_STYLE = {
@@ -93,40 +96,68 @@ def _short(items: list[str], limit: int = 70) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _merge_same(findings) -> list[tuple[object, list[str]]]:
+    """Одна CVE в пакетах из одного исходника (musl и musl-utils) с теми же версиями —
+    одна строка со списком пакетов. Счётчики в заголовке остаются как у Trivy."""
+    rows: dict[tuple, tuple[object, list[str]]] = {}
+    for f in findings:
+        key = (f.check_id, f.title, f.installed_version, f.fixed_version, f.location) \
+            if f.package else (id(f),)
+        if key in rows:
+            rows[key][1].append(f.package)
+        else:
+            rows[key] = (f, [f.package] if f.package else [])
+    return list(rows.values())
+
+
 def _print_severity_table(console: Console, findings, top: int, show_where: bool) -> None:
+    # Приоритет и движок в терминале не показываем: приоритет здесь повторяет уровень,
+    # а движок в этих разделах один. Оба поля остаются в JSON и HTML.
     has_package = any(f.package for f in findings)
     has_version = any(f.installed_version for f in findings)
+    # Ширины колонок считаем от окна сами. Раньше у «Названия» был постоянный минимум 34,
+    # и в окне уже ~110 символов Rich отрезал правые колонки целиком; без минимума он
+    # сжимал «Название» до одной буквы. Теперь узкие колонки ограничены сверху, а
+    # «Название» получает остальное.
+    id_width = max(len(f.check_id) for f in findings)
+    # место для текста без рамок, значка и ID (рамка — 3 символа на колонку)
+    rest = console.width - 3 * (3 + 2 * has_version + has_package) - 1 - 2 - id_width
+    where_column = show_where and rest >= 70      # в узком окне «Где» — строкой под названием
+    if where_column:
+        rest -= 3
+    where_width = max(10, rest // 5) if where_column else 0
+    n_narrow = 2 * has_version + has_package
+    narrow = max(12 if rest >= 60 else 6, (rest - where_width - rest * 2 // 5) // max(n_narrow, 1))
     table = Table(show_lines=True, expand=True)
     table.add_column("", width=2)
     table.add_column("ID", no_wrap=True)
     if has_package:
-        table.add_column("Пакет", overflow="fold")
+        table.add_column("Пакет", max_width=narrow, overflow="fold")
     if has_version:
-        table.add_column("Установлена", overflow="fold")
-        table.add_column("Исправлено в", overflow="fold")  # версия, либо статус, если исправления нет
-    table.add_column("Название", ratio=4, min_width=34, overflow="fold")
-    if show_where:
-        table.add_column("Где", ratio=2, min_width=14, overflow="fold")
-    table.add_column("Приоритет", justify="right")
-    table.add_column("Источник")
+        table.add_column("Установлена", max_width=narrow, overflow="fold")
+        table.add_column("Исправлено в", max_width=narrow, overflow="fold")  # версия, либо статус, если исправления нет
+    table.add_column("Название", ratio=1, overflow="fold")
+    if where_column:
+        table.add_column("Где", max_width=where_width, overflow="fold")
 
     shown = findings if top <= 0 else findings[:top]
-    for finding in shown:
+    for finding, packages in _merge_same(shown):
         style = _SEVERITY_STYLE[finding.severity.value]
         row = [_SEVERITY_ICON[finding.severity.value], Text(finding.check_id, style=style)]
         if has_package:
-            row.append(Text(finding.package or "—"))
+            row.append(Text("\n".join(packages) or "—"))
         if has_version:
             row += [Text(finding.installed_version or "—"), Text(finding.fixed_version or "—")]
         title = Text(finding.title)
         if finding.remediation:
             title.append(f"\nКак исправить: {finding.remediation}", style="green")
+        if show_where and not where_column and finding.location:
+            title.append(f"\nГде: {finding.location}", style="cyan")
         if finding.url:
             title.append(f"\n{finding.url}", style="dim")
         row.append(title)
-        if show_where:
+        if where_column:
             row.append(Text(finding.location or "—"))
-        row += [str(finding.priority_score), ", ".join(finding.confirmed_by)]
         table.add_row(*row)
     console.print(table)
 
@@ -145,8 +176,24 @@ def _group_by_place(findings) -> list[tuple[str, list]]:
     for f in findings:
         groups.setdefault(f.location or "—", []).append(f)
     order = list(groups)
+    # сначала самые серьёзные; «весь файл» («нет USER», «нет HEALTHCHECK») — среди них же,
+    # а при равной серьёзности — после мест со строками
     return sorted(groups.items(), key=lambda kv: (
-        -max(f.severity.rank for f in kv[1]), -len(kv[1]), order.index(kv[0])))
+        -max(f.severity.rank for f in kv[1]), not _has_lines(kv[0]), -len(kv[1]), order.index(kv[0])))
+
+
+def _has_lines(place: str) -> bool:
+    return bool(re.search(r":\d+(-\d+)?$", place))
+
+
+def _message_differs(f) -> bool:
+    """Message Trivy показываем, только если он добавляет что-то к названию и совету."""
+    if not f.message:
+        return False
+    norm = lambda t: re.sub(r"\W+", " ", (t or "").lower()).strip()
+    msg = norm(f.message)
+    return all(SequenceMatcher(None, msg, norm(other)).ratio() < 0.85
+               for other in (f.title, f.remediation))
 
 
 def _code_text(lines: list[dict]) -> Text:
@@ -160,13 +207,29 @@ def _code_text(lines: list[dict]) -> Text:
         if not line["is_cause"]:
             mark = " "
         elif len(causes) == 1:
-            mark = "▶"
+            mark = "["          # одна строка-причина — как у Trivy: «1 [ FROM ubuntu:latest»
         else:
             mark = "┌" if i == causes[0] else ("└" if i == causes[-1] else "│")
         text.append(f"  {line['number']:>{width}} ", style="dim")
         text.append(f"{mark} ", style="yellow")
         text.append(line["content"].rstrip(), style=None if line["is_cause"] else "dim")
     return text
+
+
+def _append_hint(fix: Text, lines) -> None:
+    """Кусок YAML под советом: серым — что уже есть в файле, зелёным — что дописать."""
+    first_add = True
+    for text, state, old in lines:
+        if state == EXISTS:
+            fix.append(f"\n  {text}", style="dim")
+            fix.append("  (уже есть)", style="dim italic")
+            continue
+        fix.append(f"\n  {text}", style="green")
+        if state == CHANGE:
+            fix.append(f"  ← сейчас {old}", style="yellow")
+        elif state == ADD and first_add:
+            fix.append("  ← добавить", style="yellow")
+            first_add = False
 
 
 def _print_config_groups(console: Console, findings, top: int) -> None:
@@ -179,7 +242,8 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         if not rows:
             continue
         head = Text()
-        head.append(f"▌ {place}", style="bold cyan")
+        head.append(f"▌ {place}" if _has_lines(place) or place == "—" else f"▌ {place} — весь файл",
+                    style="bold cyan")
         head.append(f"  {len(group)} шт.:", style="bold")
         for sev in ("critical", "high", "medium", "low", "unknown"):
             n = sum(1 for f in group if f.severity.value == sev)
@@ -191,7 +255,7 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         code = next((f.code_lines for f in group if f.code_lines), [])
         if code:
             console.print(_code_text(code))
-        else:
+        elif _has_lines(place):
             console.print("  [dim](Trivy не прислал строки кода для этого места)[/dim]")
 
         table = Table(show_lines=True, expand=True)
@@ -201,14 +265,12 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         table.add_column("Как исправить", ratio=1, overflow="fold")
         for f in sorted(rows, key=lambda f: (-f.severity.rank, f.check_id)):
             what = Text(f.title)
+            if _message_differs(f):
+                what.append(f"\n{f.message}")
             if f.url:
                 what.append(f"\n{f.url}", style="dim")
             fix = Text(f.remediation or "—")
-            hint = yaml_hint(f.check_id, f.remediation)
-            if hint:
-                fix.append("\nв файле:", style="green")
-                for line in hint:
-                    fix.append(f"\n  {line}", style="green")
+            _append_hint(fix, hint_lines(f.check_id, f.remediation, f.message, f.code_lines or code))
             table.add_row(_SEVERITY_ICON[f.severity.value],
                           Text(f.check_id, style=_SEVERITY_STYLE[f.severity.value]), what, fix)
         console.print(table)
@@ -253,7 +315,7 @@ def _bench_check_cell(finding) -> Text:
 
 
 def _print_status_table(console: Console, findings, top: int) -> None:
-    """Docker Bench: по разделам CIS, в каждом — таблица WARN/NOTE/INFO, PASS одной строкой."""
+    """Docker Bench: по разделам CIS, в каждом — таблица WARN/NOTE/INFO и серые строки PASS внизу."""
     if not findings:
         console.print("[yellow]Docker Bench не вернул ни одной проверки.[/yellow]")
         return
@@ -275,9 +337,12 @@ def _print_status_table(console: Console, findings, top: int) -> None:
                 head.append(f"{status} {n}  ", style=_STATUS_STYLE[status])
         console.print(head)
         rows = [f for f in items if f.status != "PASS"]
+        passed = [f for f in items if f.status == "PASS"]
         shown = rows if top <= 0 else rows[:top]
         hidden += len(rows) - len(shown)
-        if shown:
+        # PASS — строками внизу раздела, серым; с --top места под них нет — только номера
+        pass_rows = passed if top <= 0 else []
+        if shown or pass_rows:
             table = Table(show_lines=True, expand=True)
             table.add_column("Статус", no_wrap=True)
             table.add_column("Проверка", ratio=1)
@@ -290,13 +355,19 @@ def _print_status_table(console: Console, findings, top: int) -> None:
                     # совет к WARN — руководство к действию; к NOTE/INFO — для сведения, бледнее
                     row.append(Text(f.remediation or "", style="" if f.status == "WARN" else "dim"))
                 table.add_row(*row)
+            for f in pass_rows:
+                cell = _bench_check_cell(f)
+                cell.stylize("dim")
+                row = [Text("PASS", style=_STATUS_STYLE["PASS"]), cell]
+                if has_advice:
+                    row.append(Text(""))   # делать нечего
+                table.add_row(*row)
             console.print(table)
             if len(rows) > len(shown):
                 console.print(f"[dim]  скрыто --top: {len(rows) - len(shown)}[/dim]")
-        passed = [f.check_id for f in items if f.status == "PASS"]
-        if passed:
+        if passed and not pass_rows:
             line = Text("  PASS: ", style=_STATUS_STYLE["PASS"])
-            line.append(", ".join(passed))
+            line.append(", ".join(f.check_id for f in passed))
             console.print(line)
         console.print()
     if hidden:
@@ -330,7 +401,7 @@ def _print_section(console: Console, result: ScanResult, section: Section, top: 
         _print_status_table(console, section.findings, top)
     else:
         console.print(_severity_line(section.findings, section))
-        if section.findings and result.kind == "config":
+        if section.findings and result.kind in ("config", "dockerfile"):
             _print_config_groups(console, section.findings, top)
         elif section.findings:
             _print_severity_table(console, section.findings, top,
