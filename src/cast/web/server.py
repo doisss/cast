@@ -369,8 +369,13 @@ class WebApp:
         sections, note = [], ""
         if job.result is not None:
             note = container_image_note(job.result)
+            target = job.result.target
+            several = sum(r.status == "ok" for r in job.result.runs) > 1
             for sec in build_sections(job.result):
-                data = {"sec": sec}
+                # цель уже в заголовке страницы, а движок — в строке «готово за …»:
+                # в заголовке раздела их не повторяем (движок — только если их несколько)
+                title = sec.title.replace(f" {target.value}", "") if target and target.value else sec.title
+                data = {"sec": sec, "title": title, "tool": sec.tool if several else ""}
                 if sec.kind == "status":
                     data["groups"] = _bench_groups(sec.findings)
                     data["counts"] = _status_counts(sec.findings)
@@ -727,10 +732,7 @@ def serve(port: int = 8765, open_browser: bool = True, console=None,
     port = httpd.server_address[1]
     url = f"http://127.0.0.1:{port}/"
     say(f"Веб-интерфейс cast: {url}  (логин: {auth.login})")
-    if os.geteuid() == 0:
-        say("Работает от root: host и Docker проверяются. Свой кэш Trivy у root отдельный — "
-            "первая проверка скачает базу уязвимостей заново.")
-    else:
+    if os.geteuid() != 0:
         say("Работает без root: host и запущенные контейнеры проверить не получится.")
     if local:
         say("Доступен только с этой машины (--local). Остановить: Ctrl+C")

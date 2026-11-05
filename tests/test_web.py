@@ -566,3 +566,25 @@ def test_broken_utf8_in_login_asks_again():
     login, password = web_auth.ask(said.append, read=read, read_secret=lambda _: "")
     assert login == "админ" and password                  # русский логин можно
     assert any("оборванный символ" in s for s in said) and any("пробелов" in s for s in said)
+
+
+def test_job_header_and_section_do_not_repeat_target_kind_or_engine():
+    from cast.pipeline import ScanResult, ScannerRun
+    from cast.targets import Target
+    f = Finding(source_tool="trivy", check_id="CVE-1", title="bug", severity=Severity.HIGH,
+                package="django", installed_version="2.2", location="requirements.txt")
+    f.confirmed_by = ["trivy"]
+    target = Target("fs", "/home/d/demo")
+    result = ScanResult(image="x", findings=[f], target=target,
+                        runs=[ScannerRun("trivy", "fs", "ok", "", 1, 1.0)])
+    application = web.WebApp(web.JobStore(runner=_fake_runner))
+    html = application.page_job(web.Job(1, "/home/d/demo", None, state="done", target=target, result=result))
+    assert html.count("/home/d/demo") == 2                 # <title> и заголовок, больше нигде
+    assert "<h2>Проблемы в папке</h2>" in html and "cast scan" not in html
+
+    host = Target("host", "host")
+    result = ScanResult(image="host", findings=[], target=host,
+                        runs=[ScannerRun("docker-bench", "environment", "ok", "", 0, 1.0)])
+    html = application.page_job(web.Job(2, "host", None, state="done", target=host, result=result))
+    assert html.count("Docker-хост") == 1 + html.count("Настройки Docker-хоста")   # только h1 и раздел
+    assert "<code>cast scan host</code>" in html

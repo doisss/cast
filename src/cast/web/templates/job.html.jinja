@@ -51,11 +51,11 @@
 {% set has_pkg = fs | selectattr("package") | list | length > 0 %}
 {% set has_ver = fs | selectattr("installed_version") | list | length > 0 %}
 {% set has_loc = show_where and fs | selectattr("location") | list | length > 0 %}
-<div class="table-wrap" style="margin-top:.6rem"><table class="fixed">
+<div class="table-wrap vuln-wrap" style="margin-top:.6rem"><table class="fixed vuln{{ ' with-where' if has_loc }}">
   <colgroup><col style="width:6.5rem"><col style="width:9.5rem">
     {% if has_pkg %}<col style="width:15%">{% endif %}
     {% if has_ver %}<col style="width:11.5rem"><col style="width:11.5rem">{% endif %}
-    <col>{% if has_loc %}<col style="width:20%">{% endif %}</colgroup>
+    <col>{% if has_loc %}<col style="width:16%">{% endif %}</colgroup>
   <thead><tr><th>Уровень</th><th>ID</th>
     {% if has_pkg %}<th>Пакет</th>{% endif %}
     {% if has_ver %}<th>Установлена</th><th>Исправлено в</th>{% endif %}
@@ -93,11 +93,14 @@
 {% block body %}
 <div class="row" style="margin-bottom:1rem">
   <div>
-    <h1>{{ job.target.label if job.target else job.query }}</h1>
+    {% set label = job.target.label if job.target else job.query %}
+    <h1>{{ label }}</h1>
     <div class="muted small">
-      проверка #{{ job.id }} ·
-      {% if job.target %}{{ kind_titles.get(job.target.kind, job.target.kind) }}{% if job.target.subtype %} ({{ job.target.subtype }}){% endif %} · {% endif %}
-      <code>cast scan {{ job.query }}{% if job.engines %} -e {{ job.engines | join(",") }}{% endif %}</code>
+      {# без повторов: вид цели — если его нет в заголовке, команда — если она не то же, что заголовок #}
+      проверка #{{ job.id }}
+      {%- if job.target %}{% set kind = kind_titles.get(job.target.kind, job.target.kind) %}
+        {%- if kind | lower not in label | lower %} · {{ kind }}{% if job.target.subtype %} ({{ job.target.subtype }}){% endif %}{% endif %}{% endif %}
+      {%- if job.query not in label or job.engines %} · <code>cast scan {{ job.query }}{% if job.engines %} -e {{ job.engines | join(",") }}{% endif %}</code>{% endif %}
     </div>
   </div>
   <span class="spacer"></span>
@@ -145,8 +148,8 @@
 {% for item in sections %}{% set sec = item.sec %}
 <div class="card" data-section>
   <div class="section-head">
-    <h2>{{ sec.title }}</h2>
-    <span class="muted small">{{ sec.tool }}{% if sec.extra %}, {{ sec.extra }}{% endif %}</span>
+    <h2>{{ item.title }}</h2>
+    <span class="muted small">{{ [item.tool, sec.extra] | select | join(", ") }}</span>
   </div>
 
   {% if sec.kind == "status" %}

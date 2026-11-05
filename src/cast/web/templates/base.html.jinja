@@ -253,6 +253,29 @@
   details.group[open] > summary { border-bottom: 1px solid var(--line); }
   details.group .place:first-of-type { border-top: 0; }
   /* узкое окно: строка таблицы — карточка с подписями, ничего не сжимается в столбик по слову */
+  /* таблица уязвимостей: в карточки — по ширине самой таблицы, а не окна: узкие колонки
+     (уровень, ID, версии) занимают ~40rem, и в окне ~1000-1300px названию не оставалось места */
+  .vuln-wrap { container-type: inline-size; }
+  @container (max-width: 1050px) {
+    table.vuln, table.vuln tbody, table.vuln tr, table.vuln td { display: block; width: auto; }
+    table.vuln thead, table.vuln colgroup { display: none; }
+    table.vuln tr { padding: .6rem 0; border-bottom: 1px solid var(--line); }
+    table.vuln td { border: 0; padding: .15rem .3rem; }
+    table.vuln td.c-head { display: inline-block; vertical-align: middle; }
+    table.vuln td.c-inline { display: inline-block; vertical-align: top; margin-right: 1.4rem; max-width: 100%; }
+    table.vuln td[data-label]::before { content: attr(data-label); display: block; color: var(--muted);
+      font: 600 .7rem/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
+  }
+  @container (max-width: 1250px) {
+    table.vuln.with-where, table.vuln.with-where tbody, table.vuln.with-where tr, table.vuln.with-where td { display: block; width: auto; }
+    table.vuln.with-where thead, table.vuln.with-where colgroup { display: none; }
+    table.vuln.with-where tr { padding: .6rem 0; border-bottom: 1px solid var(--line); }
+    table.vuln.with-where td { border: 0; padding: .15rem .3rem; }
+    table.vuln.with-where td.c-head { display: inline-block; vertical-align: middle; }
+    table.vuln.with-where td.c-inline { display: inline-block; vertical-align: top; margin-right: 1.4rem; max-width: 100%; }
+    table.vuln.with-where td[data-label]::before { content: attr(data-label); display: block; color: var(--muted);
+      font: 600 .7rem/1.4 -apple-system, "Segoe UI", Roboto, sans-serif; text-transform: uppercase; letter-spacing: .04em; }
+  }
   @media (max-width: 1000px) {
     table.fixed, table.fixed tbody, table.fixed tr, table.fixed td { display: block; width: auto; }
     table.fixed thead, table.fixed colgroup { display: none; }
