@@ -54,11 +54,16 @@ def test_same_cve_in_sibling_packages_is_one_row():
     assert ": 3 " in out                              # счётчик в заголовке — как у Trivy
 
 
-def test_different_versions_are_not_merged():
+def test_different_versions_are_one_row_with_version_per_package():
+    """bsdutils 1:2.41.5 и libblkid1 2.41.5 — одна CVE, одна строка; версия у каждого своя."""
     findings = [_vuln("CVE-1", "a"), _vuln("CVE-1", "b", inst="9")]
     result = ScanResult(image="x", findings=findings, target=Target("image", "x"),
                         runs=[ScannerRun("trivy", "image", "ok", "", 2, 1.0)])
-    assert _render(result, 160).count("https://avd.aquasec.com/nvd/cve-1") == 2
+    out = _render(result, 160)
+    assert out.count("https://avd.aquasec.com/nvd/cve-1") == 1
+    row = [line for line in out.splitlines() if "│" in line]
+    assert any(" a " in line and "1.2.4_git" in line for line in row)
+    assert any(" b " in line and " 9 " in line for line in row)    # версия напротив своего пакета
 
 
 DOCKERFILE = json.dumps({"Results": [{"Target": "Dockerfile", "Class": "config", "Misconfigurations": [
@@ -184,3 +189,11 @@ def test_hint_without_trivy_code_has_no_marks():
     lines = hint_lines("KSV-0003", "Add 'ALL' to containers[].securityContext.capabilities.drop.", MSG, [])
     assert {state for _, state, _ in lines} == {PLAIN}
     assert lines[1][0] == "  - name: web"                       # прочерк там же, где в файле
+
+
+def test_repeated_package_prefix_in_trivy_title_is_dropped():
+    from cast.scanners.trivy import _vuln_title
+    assert _vuln_title({"Title": "util-linux: util-linux: failed mount helper"}) == "util-linux: failed mount helper"
+    assert _vuln_title({"Title": "django: Django: SQL injection"}) == "Django: SQL injection"
+    assert _vuln_title({"Title": "systemd: systemd-homed: escalation"}) == "systemd: systemd-homed: escalation"
+    assert _vuln_title({"VulnerabilityID": "CVE-9"}) == "CVE-9"

@@ -124,7 +124,9 @@ def test_place_without_lines_is_whole_file():
     assert "Trivy не прислал строки кода" not in buf.getvalue()
 
 
-def test_other_targets_keep_the_table():
+def test_folder_shows_configs_like_a_single_file():
+    """В папке yaml и Dockerfile показываются так же, как при проверке одного файла:
+    файл, под ним места со строками кода и подсказки YAML, а не общая таблица."""
     class Folder(_Fake):
         pass
 
@@ -132,7 +134,9 @@ def test_other_targets_keep_the_table():
     buf = StringIO()
     console_report.render(result, console=Console(file=buf, width=200, force_terminal=False))
     out = buf.getvalue()
-    assert "Что не так" not in out and "▌" not in out   # обычная таблица, не группы по месту
+    assert "Ошибки конфигурации:" in out and "━ deploy.yaml" in out
+    assert "▌ строки" in out and "Что не так" in out
+    assert "deploy.yaml:" not in out          # файл назван заголовком, у мест — только строки
     assert "Приоритет" not in out and "Источник" not in out   # остались в JSON и HTML
 
 

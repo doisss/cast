@@ -96,18 +96,49 @@ def _short(items: list[str], limit: int = 70) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
-def _merge_same(findings) -> list[tuple[object, list[str]]]:
-    """Одна CVE в пакетах из одного исходника (musl и musl-utils) с теми же версиями —
-    одна строка со списком пакетов. Счётчики в заголовке остаются как у Trivy."""
-    rows: dict[tuple, tuple[object, list[str]]] = {}
+def _merge_same(findings) -> list[tuple[object, list[str], list[tuple[str, list[str]]]]]:
+    """Одна CVE в пакетах из одного исходника (musl и musl-utils) — одна строка со
+    списком пакетов. Версии у таких пакетов бывают разные (bsdutils 1:2.41.5 и
+    libblkid1 2.41.5) — тогда пакеты собраны по версии, и каждая версия стоит
+    напротив своих пакетов. Возвращает (находка, пакеты, [(версия, пакеты)]).
+    Счётчики в заголовке остаются как у Trivy."""
+    rows: dict[tuple, tuple[object, list[str], dict[str, list[str]]]] = {}
     for f in findings:
-        key = (f.check_id, f.title, f.installed_version, f.fixed_version, f.location) \
-            if f.package else (id(f),)
-        if key in rows:
-            rows[key][1].append(f.package)
+        key = (f.check_id, f.title, f.fixed_version, f.location) if f.package else (id(f),)
+        if key not in rows:
+            rows[key] = (f, [], {})
+        _, packages, by_version = rows[key]
+        if f.package:
+            packages.append(f.package)
+        by_version.setdefault(f.installed_version or "—", []).append(f.package or "—")
+    return [(f, packages, list(by_version.items())) for f, packages, by_version in rows.values()]
+
+
+def split_configs(findings) -> tuple[list, list[tuple[str, list]]]:
+    """У папки, репозитория и образа диска в одном списке и уязвимые пакеты, и ошибки
+    конфигурации из найденных внутри Dockerfile и yaml. Ошибки конфигурации отделяем и
+    собираем по файлам, чтобы показать их так же, как при проверке одного файла."""
+    vulns, files = [], {}
+    for f in findings:
+        if f.pkg_type == "config":
+            name = re.sub(r":\d+(-\d+)?$", "", f.location or "—")
+            files.setdefault(name, []).append(f)
         else:
-            rows[key] = (f, [f.package] if f.package else [])
-    return list(rows.values())
+            vulns.append(f)
+    order = list(files)
+    by_file = sorted(files.items(), key=lambda kv: (
+        -max(f.severity.rank for f in kv[1]), -len(kv[1]), order.index(kv[0])))
+    return vulns, by_file
+
+
+def place_label(place: str, in_file: bool = False) -> str:
+    """Подпись места. in_file — файл уже назван выше, оставляем только строки."""
+    if not in_file:
+        return place if _has_lines(place) or place == "—" else f"{place} — весь файл"
+    m = re.search(r":(\d+)(?:-(\d+))?$", place)
+    if not m:
+        return "весь файл"
+    return f"строки {m.group(1)}–{m.group(2)}" if m.group(2) else f"строка {m.group(1)}"
 
 
 def _print_severity_table(console: Console, findings, top: int, show_where: bool) -> None:
@@ -128,7 +159,9 @@ def _print_severity_table(console: Console, findings, top: int, show_where: bool
     where_width = max(10, rest // 5) if where_column else 0
     n_narrow = 2 * has_version + has_package
     narrow = max(12 if rest >= 60 else 6, (rest - where_width - rest * 2 // 5) // max(n_narrow, 1))
-    table = Table(show_lines=True, expand=True)
+    # черты между строками ставит end_section: у CVE с пакетами разных версий
+    # несколько строк таблицы, и между ними черты нет
+    table = Table(expand=True)
     table.add_column("", width=2)
     table.add_column("ID", no_wrap=True)
     if has_package:
@@ -141,13 +174,13 @@ def _print_severity_table(console: Console, findings, top: int, show_where: bool
         table.add_column("Где", max_width=where_width, overflow="fold")
 
     shown = findings if top <= 0 else findings[:top]
-    for finding, packages in _merge_same(shown):
+    for finding, packages, by_version in _merge_same(shown):
         style = _SEVERITY_STYLE[finding.severity.value]
         row = [_SEVERITY_ICON[finding.severity.value], Text(finding.check_id, style=style)]
         if has_package:
-            row.append(Text("\n".join(packages) or "—"))
+            row.append(Text("\n".join(by_version[0][1] if has_version else packages) or "—"))
         if has_version:
-            row += [Text(finding.installed_version or "—"), Text(finding.fixed_version or "—")]
+            row += [Text(by_version[0][0]), Text(finding.fixed_version or "—")]
         title = Text(finding.title)
         if finding.remediation:
             title.append(f"\nКак исправить: {finding.remediation}", style="green")
@@ -158,7 +191,13 @@ def _print_severity_table(console: Console, findings, top: int, show_where: bool
         row.append(title)
         if where_column:
             row.append(Text(finding.location or "—"))
-        table.add_row(*row)
+        extra = by_version[1:] if has_version else []
+        table.add_row(*row, end_section=not extra)
+        # пакеты с другой версией — строками ниже, без черты: та же CVE, версия напротив пакетов
+        for i, (version, names) in enumerate(extra):
+            sub = ["", ""] + ([Text("\n".join(names))] if has_package else []) + [Text(version), ""]
+            sub += [""] + ([""] if where_column else [])
+            table.add_row(*sub, end_section=i == len(extra) - 1)
     console.print(table)
 
     hidden = len(findings) - len(shown)
@@ -223,8 +262,9 @@ def _append_hint(fix: Text, lines) -> None:
         fix.append(f"\n  {text}", style="dim" if state == EXISTS else "green")
 
 
-def _print_config_groups(console: Console, findings, top: int) -> None:
-    """Ошибки конфигурации: место в файле, его код один раз и таблица правил под ним."""
+def _print_config_groups(console: Console, findings, top: int, in_file: bool = False) -> None:
+    """Ошибки конфигурации: место в файле, его код один раз и таблица правил под ним.
+    in_file — файл уже назван заголовком выше (проверка папки), у мест — только строки."""
     shown = findings if top <= 0 else findings[:top]
     visible = {id(f) for f in shown}
     # места и их счётчики — по всем находкам, --top ограничивает только строки таблиц
@@ -233,8 +273,7 @@ def _print_config_groups(console: Console, findings, top: int) -> None:
         if not rows:
             continue
         head = Text()
-        head.append(f"▌ {place}" if _has_lines(place) or place == "—" else f"▌ {place} — весь файл",
-                    style="bold cyan")
+        head.append(f"▌ {place_label(place, in_file)}", style="bold cyan")
         head.append(f"  {len(group)} шт.:", style="bold")
         for sev in ("critical", "high", "medium", "low", "unknown"):
             n = sum(1 for f in group if f.severity.value == sev)
@@ -383,6 +422,33 @@ _CONTAINER_BENCH_NOTE = (
 )
 
 
+def vulns_title(findings) -> str:
+    return "Уязвимые пакеты и секреты" if any(f.pkg_type == "secret" for f in findings) \
+        else "Уязвимые пакеты"
+
+
+def _print_mixed(console: Console, findings, top: int) -> None:
+    """Папка, репозиторий, образ диска: сначала уязвимые пакеты, потом ошибки
+    конфигурации по файлам — каждый файл так же, как при проверке его одного."""
+    vulns, by_file = split_configs(findings)
+    if vulns:
+        console.print(Text(f"{vulns_title(vulns)}: {len(vulns)}", style="bold"))
+        _print_severity_table(console, vulns, top, show_where=True)
+        console.print()
+    configs = sum(len(group) for _, group in by_file)
+    console.print(Text(f"Ошибки конфигурации: {configs}, файлов: {len(by_file)}", style="bold"))
+    for name, group in by_file:
+        head = Text("━ ", style="bold magenta")
+        head.append(name, style="bold magenta")
+        head.append(f"  {len(group)} шт.:", style="bold")
+        for sev in ("critical", "high", "medium", "low", "unknown"):
+            n = sum(1 for f in group if f.severity.value == sev)
+            if n:
+                head.append(f"  {_SEVERITY_ICON[sev]} {sev.upper()}: {n}", style=_SEVERITY_STYLE[sev])
+        console.print(head)
+        _print_config_groups(console, group, top, in_file=True)
+
+
 def _print_section(console: Console, result: ScanResult, section: Section, top: int) -> None:
     if section.kind == "status":
         console.print(_status_line(section.findings, section))
@@ -395,9 +461,12 @@ def _print_section(console: Console, result: ScanResult, section: Section, top: 
         if section.findings and result.kind in ("config", "dockerfile"):
             _print_config_groups(console, section.findings, top)
         elif section.findings:
-            _print_severity_table(console, section.findings, top,
-                                  show_where=result.kind in _SHOW_WHERE
-                                  or len({f.location for f in section.findings}) > 1)
+            if result.kind != "cluster" and any(f.pkg_type == "config" for f in section.findings):
+                _print_mixed(console, section.findings, top)
+            else:
+                _print_severity_table(console, section.findings, top,
+                                      show_where=result.kind in _SHOW_WHERE
+                                      or len({f.location for f in section.findings}) > 1)
             if any(f.severity.value == "unknown" for f in section.findings):
                 console.print("[dim]❓ UNKNOWN — Trivy не указал уровень критичности "
                               "(так бывает у свежих записей и у баз вроде Debian Security Tracker).[/dim]")

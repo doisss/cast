@@ -89,6 +89,16 @@ def _is_oci_only_archive(path: Path) -> bool:
     return "index.json" in names and "manifest.json" not in names
 
 
+_REPEATED_PREFIX = re.compile(r"^([\w.+-]+): (?=\1: )", re.IGNORECASE)
+
+
+def _vuln_title(vuln: dict) -> str:
+    """Название CVE. В базе Trivy у части записей имя пакета повторено дважды
+    («util-linux: util-linux: failed …», «django: Django: …») — оставляем одно."""
+    title = vuln.get("Title") or vuln.get("VulnerabilityID", "")
+    return _REPEATED_PREFIX.sub("", title)
+
+
 def _vuln_location(vuln: dict, resource: str | None, target_name: str | None) -> str | None:
     """Где найден уязвимый пакет: PkgPath, если Trivy его дал (у rootfs все venv'ы с pip —
     один Target «Python», различаются только путём), иначе Target."""
@@ -473,7 +483,7 @@ class TrivyScanner(Scanner):
                     Finding(
                         source_tool=self.name,
                         check_id=vuln.get("VulnerabilityID", "UNKNOWN"),
-                        title=vuln.get("Title") or vuln.get("VulnerabilityID", ""),
+                        title=_vuln_title(vuln),
                         severity=Severity.from_trivy(vuln.get("Severity", "")),
                         description=vuln.get("Description", ""),
                         package=vuln.get("PkgName"),

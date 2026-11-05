@@ -39,7 +39,7 @@ from cast.context import ScanContext
 from cast.pipeline import EngineSelectionError, ScanResult, run_scan
 from cast.report import html_report, json_report
 from cast.report.console import (_BENCH_MARKS, _BENCH_SECTIONS, _SHOW_WHERE, _group_by_place, _has_lines,
-                                 _merge_same, _message_differs)
+                                 _merge_same, _message_differs, place_label, split_configs, vulns_title)
 from cast.report.fix_hint import CHANGE, EXISTS, hint_lines
 from cast.report.sections import (STATUS_HELP, build_sections, container_image_note,
                                   sort_status_findings)
@@ -66,6 +66,7 @@ class Job:
     target: Target | None = None
     engine: str = ""               # какой движок работает сейчас
     text: str = ""                 # что он делает (ProgressUI.say)
+    text_is_hint: bool = False     # text — общая подсказка движка («проверяю»), не шаг
     fraction: float | None = None  # полоса загрузки (ProgressUI.progress)
     label: str = ""
     log: list[str] = field(default_factory=list)
@@ -90,9 +91,17 @@ class _JobUI(ProgressUI):
         self.job = job
 
     def say(self, text: str) -> None:
-        self.job.text = text
+        """Текущий шаг показывается над полосой; в журнал уходят только прошедшие
+        шаги, иначе одна и та же строка видна и сверху, и в журнале."""
+        target = self.job.target
+        if target and target.value:          # путь уже в заголовке страницы — не повторяем
+            text = text.replace(f" {target.value}", "")
+        if text == self.job.text:
+            return
+        if self.job.text and not self.job.text_is_hint:
+            self.job.log.append(f"{self.job.engine}: {self.job.text}")
+        self.job.text, self.job.text_is_hint = text, False
         self.job.fraction = None
-        self.job.log.append(f"{self.job.engine}: {text}")
 
     def progress(self, fraction: float, label: str = "") -> None:
         self.job.fraction = max(0.0, min(1.0, fraction))
@@ -151,10 +160,10 @@ class JobStore:
         def on_progress(event: str, scanner, detail: str = "") -> None:
             if event == "start":
                 job.engine, job.fraction = scanner.name, None
-                job.text = scanner.progress_hint or "работаю"
-                job.log.append(f"{scanner.name}: запущен")
+                job.text, job.text_is_hint = scanner.progress_hint or "работаю", True
             elif event == "done":
                 job.log.append(f"{scanner.name}: готово, записей: {detail}")
+                job.text = ""
             elif event == "fail":
                 job.log.append(f"{scanner.name}: НЕ ВЫПОЛНЕН: {detail}")
 
@@ -200,16 +209,15 @@ def _code_lines(lines: list[dict]) -> list[dict]:
     return out
 
 
-def _place_label(place: str, cluster: bool) -> str:
-    if not cluster:
-        return place + ("" if _has_lines(place) or place == "—" else " — весь файл")
-    m = re.search(r":(\d+)(?:-(\d+))?$", place)
-    if not m:
+def _place_label(place: str, where: str) -> str:
+    """where: "" — проверяли один файл; "file" — файл назван выше (папка);
+    "cluster" — ресурс кластера назван выше."""
+    if where == "cluster" and not _has_lines(place):
         return "весь ресурс"
-    return f"строки {m.group(1)}–{m.group(2)}" if m.group(2) else f"строка {m.group(1)}"
+    return place_label(place, in_file=bool(where))
 
 
-def _config_places(findings, cluster: bool = False) -> list[dict]:
+def _config_places(findings, where: str = "") -> list[dict]:
     """Ошибки конфигурации по месту в файле — как в терминале: код один раз, правила под ним."""
     places = []
     for place, group in _group_by_place(findings):
@@ -220,7 +228,7 @@ def _config_places(findings, cluster: bool = False) -> list[dict]:
                      "old": old if st == CHANGE else None}
                     for t, st, old in hint_lines(f.check_id, f.remediation, f.message, f.code_lines or code)]
             rules.append({"f": f, "message": f.message if _message_differs(f) else "", "hint": hint})
-        places.append({"place": place, "label": _place_label(place, cluster),
+        places.append({"place": place, "label": _place_label(place, where),
                        "whole_file": not _has_lines(place) and place != "—",
                        "counts": _sev_counts(group), "code": _code_lines(code), "rules": rules,
                        "no_code": not code and _has_lines(place)})
@@ -262,7 +270,7 @@ def _cluster_resources(findings) -> list[dict]:
     out = []
     for resource, group in groups.items():
         out.append({"name": resource, "counts": _sev_counts(group), "total": len(group),
-                    "worst": _worst(group), "places": _config_places(group, cluster=True)})
+                    "worst": _worst(group), "places": _config_places(group, "cluster")})
     out.sort(key=lambda g: (-g["worst"], -g["total"], g["name"]))
     return out
 
@@ -282,13 +290,23 @@ def _cluster_vulns(findings) -> list[dict]:
             os_image = target.endswith(")") and " (" in target
             parts.append({"name": target, "what": "образ" if os_image else "программа в образе",
                           "counts": _sev_counts(group), "total": len(group), "worst": _worst(group),
-                          "rows": [{"f": f, "packages": pk} for f, pk in _merge_same(group)]})
+                          "rows": _vuln_rows(group)})
         parts.sort(key=lambda t: (-t["worst"], -t["total"], t["name"]))
         every = [f for group in targets.values() for f in group]
         out.append({"name": resource, "targets": parts, "counts": _sev_counts(every),
                     "total": len(every), "worst": _worst(every)})
     out.sort(key=lambda g: (-g["worst"], -g["total"], g["name"]))
     return out
+
+
+def _vuln_rows(findings) -> list[dict]:
+    return [{"f": f, "packages": pk, "by_version": bv} for f, pk, bv in _merge_same(findings)]
+
+
+def _config_files(by_file) -> list[dict]:
+    """Ошибки конфигурации внутри папки — по файлам, у каждого места как у одного файла."""
+    return [{"name": name, "counts": _sev_counts(group), "total": len(group),
+             "places": _config_places(group, "file")} for name, group in by_file]
 
 
 def _sev_counts(findings) -> dict[str, int]:
@@ -366,8 +384,12 @@ class WebApp:
                         data["vulns"] = _cluster_vulns([f for f in sec.findings if f.pkg_type != "config"])
                         data["config_counts"] = _sev_counts(configs)
                     else:
-                        data["rows"] = [{"f": f, "packages": pk} for f, pk in _merge_same(sec.findings)]
+                        vulns, by_file = split_configs(sec.findings)
+                        data["rows"] = _vuln_rows(vulns)
                         data["show_where"] = job.result.kind in _SHOW_WHERE
+                        if by_file:            # папка, репозиторий: там и пакеты, и Dockerfile с yaml
+                            data["files"] = _config_files(by_file)
+                            data["vulns_title"], data["vulns_total"] = vulns_title(vulns), len(vulns)
                 sections.append(data)
         need_root = bool(job.result) and os.geteuid() != 0 and any(
             r.name == "docker-bench" and r.status != "ok" for r in job.result.runs)

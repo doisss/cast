@@ -67,9 +67,16 @@
         data-search="{{ (f.check_id ~ ' ' ~ f.title ~ ' ' ~ (r.packages | join(' ')) ~ ' ' ~ (f.location or '')) | lower }}">
       <td class="c-head">{{ sev_pill(f) }}</td>
       <td class="mono c-head">{% if f.url %}<a href="{{ f.url }}" target="_blank" rel="noopener">{{ f.check_id }}</a>{% else %}{{ f.check_id }}{% endif %}</td>
+      {% if has_pkg and has_ver and r.by_version | length > 1 %}
+      {# у пакетов разные версии: пакеты по версии, версия напротив своих пакетов #}
+      <td colspan="2" class="mono c-inline" data-label="Пакеты и версии"><div class="pv">
+        {% for v, names in r.by_version %}<div>{% for pk in names %}<div>{{ pk }}</div>{% endfor %}</div><div class="small">{{ v }}</div>{% endfor %}
+      </div></td>
+      {% else %}
       {% if has_pkg %}<td class="mono c-inline" data-label="Пакет">{% for pk in r.packages %}<div>{{ pk }}</div>{% else %}—{% endfor %}</td>{% endif %}
+      {% if has_ver %}<td class="mono small c-inline" data-label="Установлена">{{ f.installed_version or "—" }}</td>{% endif %}
+      {% endif %}
       {% if has_ver %}
-      <td class="mono small c-inline" data-label="Установлена">{{ f.installed_version or "—" }}</td>
       <td class="mono small c-inline" style="color:var(--ok)" data-label="Исправлено в">{{ f.fixed_version or "" }}{% if not f.fixed_version %}<span class="muted">исправления нет</span>{% endif %}</td>
       {% endif %}
       <td data-label="Название">{{ f.title }}
@@ -109,7 +116,7 @@
     <span class="muted small mono" id="live-time"></span></div>
   <div class="bar indet" id="live-bar" style="margin-top:.8rem"><div></div></div>
   <div class="muted small" id="live-label" style="margin-top:.3rem"></div>
-  <div class="log mono" id="live-log"></div>
+  <div class="log mono" id="live-log" hidden></div>
 </div>
 {% elif job.state == "error" %}
 <div class="banner bad">Ошибка: {{ job.error }}</div>
@@ -190,7 +197,7 @@
       <span class="chip" data-filter="{{ sev }}"><span class="pill sev-{{ sev }}">{{ sev | upper }}</span> {{ item.counts[sev] }}</span>
       {% endfor %}
       <span class="spacer"></span>
-      {% if item.places or item.resources %}
+      {% if item.places or item.resources or item.files %}
       <label class="switch" title="Открыть или закрыть код во всех местах сразу"><input type="checkbox" data-code-all><span></span> Код из файла</label>
       {% endif %}
       {% if sec.findings %}<input type="text" data-search-input placeholder="Поиск: CVE, пакет, ресурс, файл" class="search">{% endif %}
@@ -227,6 +234,20 @@
       {% endfor %}
       {% endif %}
       <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
+    {% elif sec.findings and item.files %}
+      {% if item.rows %}
+      <h3 class="sub-h">{{ item.vulns_title }} <span class="muted">{{ item.vulns_total }} шт.</span></h3>
+      {{ vuln_table(item.rows, item.show_where) }}
+      {% endif %}
+      <h3 class="sub-h">Ошибки конфигурации в файлах <span class="muted">{{ item.files | sum(attribute="total") }} шт., файлов: {{ item.files | length }}</span></h3>
+      {% for g in item.files %}
+      <details class="group" data-group open>
+        <summary><span class="mono">{{ g.name }}</span> <span class="small muted">{{ g.total }} шт.</span>
+          {% for sev in ["critical", "high", "medium", "low", "unknown"] if g.counts[sev] %}<span class="pill sev-{{ sev }}">{{ sev | upper }} {{ g.counts[sev] }}</span>{% endfor %}</summary>
+        {{ places_block(g.places) }}
+      </details>
+      {% endfor %}
+      <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
     {% elif sec.findings %}
       {{ vuln_table(item.rows, item.show_where) }}
       <p class="muted small hidden" data-empty>Под фильтр ничего не подходит.</p>
@@ -255,6 +276,7 @@
       document.getElementById("live-label").textContent = s.label || "";
       const log = document.getElementById("live-log");
       log.textContent = s.log.join("\n");
+      log.hidden = !s.log.length;
       log.style.whiteSpace = "pre-wrap";
       log.scrollTop = log.scrollHeight;
       setTimeout(poll, 800);

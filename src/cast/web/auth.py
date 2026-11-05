@@ -98,12 +98,48 @@ def save(login: str, password_hash: str, path: Path | None = None) -> Path:
     return path
 
 
+_BROKEN_INPUT = ("Не разобрал ввод: в нём оборванный символ. Так бывает, если стереть русскую "
+                 "букву, а терминал удалил только половину её байтов. Введите ещё раз.")
+
+
+def _read(read, prompt: str, say) -> str:
+    """Ввод с повтором: оборванный UTF-8 (стёртая наполовину русская буква) — не падение,
+    а просьба ввести снова."""
+    while True:
+        try:
+            return read(prompt)
+        except UnicodeDecodeError:
+            say(_BROKEN_INPUT)
+
+
+def check_login(login: str) -> str:
+    """Пусто — логин подходит, иначе что не так. Логин — любые буквы (и русские),
+    цифры и знаки, но без пробелов: его вводят в форме входа, и пробел по краям легко
+    не заметить."""
+    if not login:
+        return "логин пустой"
+    if len(login) > 64:
+        return "логин длиннее 64 символов"
+    if any(ch.isspace() or not ch.isprintable() for ch in login):
+        return "в логине не должно быть пробелов и служебных символов"
+    return ""
+
+
 def ask(say, read=input, read_secret=getpass.getpass) -> tuple[str, str]:
     """Спросить логин и пароль в терминале. Пустой пароль — придумать случайный."""
+    try:
+        import readline  # noqa: F401  — с ним input() стирает русскую букву целиком
+    except ImportError:
+        pass
     default = os.environ.get("SUDO_USER") or getpass.getuser()
-    login = read(f"Логин для входа в веб [{default}]: ").strip() or default
     while True:
-        password = read_secret("Пароль (Enter — придумать случайный): ")
+        login = _read(read, f"Логин для входа в веб [{default}]: ", say).strip() or default
+        problem = check_login(login)
+        if not problem:
+            break
+        say(f"Не подходит: {problem}")
+    while True:
+        password = _read(read_secret, "Пароль (Enter — придумать случайный): ", say)
         if not password:
             password = secrets.token_urlsafe(9)
             say(f"Пароль: {password}  — запишите его, больше он не покажется")
@@ -111,7 +147,7 @@ def ask(say, read=input, read_secret=getpass.getpass) -> tuple[str, str]:
         if len(password) < 8:
             say("Пароль короче 8 символов — придумайте длиннее")
             continue
-        if read_secret("Ещё раз: ") == password:
+        if _read(read_secret, "Ещё раз: ", say) == password:
             break
         say("Пароли не совпали, попробуйте снова")
     return login, password

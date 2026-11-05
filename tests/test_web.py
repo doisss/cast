@@ -514,3 +514,55 @@ def test_no_sudo_flag_skips_rerun(monkeypatch, tmp_path):
     monkeypatch.setattr(web, "rerun_with_sudo", lambda console=None: pytest.fail("sudo не нужен"))
     monkeypatch.setattr(web, "serve", lambda *a, **kw: 0)
     assert main(["web", "--no-sudo"]) == 0
+
+
+def test_folder_page_shows_configs_per_file_and_versions_per_package():
+    from cast.pipeline import ScanResult, ScannerRun
+    from cast.targets import Target
+    conf = Finding(source_tool="trivy", check_id="KSV-0017", title="Privileged", severity=Severity.HIGH,
+                   remediation="Change 'containers[].securityContext.privileged' to 'false'.",
+                   location="deploy.yaml:16-17", pkg_type="config",
+                   message="Container 'web' of Deployment 'web' should set 'securityContext.privileged' to false",
+                   code_lines=[{"number": 16, "content": "          securityContext:", "is_cause": True},
+                               {"number": 17, "content": "            privileged: true", "is_cause": True}])
+    a = Finding(source_tool="trivy", check_id="CVE-2026-7", title="mount", severity=Severity.HIGH,
+                package="bsdutils", installed_version="1:2.41.5", location="requirements.txt")
+    b = Finding(source_tool="trivy", check_id="CVE-2026-7", title="mount", severity=Severity.HIGH,
+                package="libblkid1", installed_version="2.41.5", location="requirements.txt")
+    for f in (conf, a, b):
+        f.confirmed_by = ["trivy"]
+    result = ScanResult(image=".", findings=[conf, a, b], target=Target("fs", "/x"),
+                        runs=[ScannerRun("trivy", "fs", "ok", "", 3, 1.0)])
+    application = web.WebApp(web.JobStore(runner=_fake_runner))
+    html = application.page_job(web.Job(1, "/x", None, state="done", target=result.target, result=result))
+    assert "Ошибки конфигурации в файлах" in html and "Уязвимые пакеты" in html
+    assert '<span class="mono">deploy.yaml</span>' in html and "▌ строки 16–17" in html
+    assert 'class="h-new">      privileged: false' in html and "Код из файла" in html
+    assert html.count("CVE-2026-7</a>") + html.count(">CVE-2026-7<") == 1       # одна строка
+    assert '<div><div>bsdutils</div></div><div class="small">1:2.41.5</div>' in html   # версия напротив пакета
+
+
+def test_live_log_does_not_repeat_current_step():
+    from cast.targets import Target
+    job = web.Job(1, "x", None, engine="trivy", text="проверяю", text_is_hint=True,
+                  target=Target("fs", "/home/d/demo"))
+    ui = web._JobUI(job)
+    ui.say("скачиваю базу")
+    ui.say("скачиваю базу")
+    assert job.text == "скачиваю базу" and job.log == []      # текущий шаг — только сверху
+    ui.say("читаю файлы папки /home/d/demo")
+    assert job.log == ["trivy: скачиваю базу"] and job.text == "читаю файлы папки"
+
+
+def test_broken_utf8_in_login_asks_again():
+    typed = iter([UnicodeDecodeError("utf-8", b"\xd1", 0, 1, "invalid"), "ад мин", "админ"])
+
+    def read(_):
+        value = next(typed)
+        if isinstance(value, Exception):
+            raise value
+        return value
+    said = []
+    login, password = web_auth.ask(said.append, read=read, read_secret=lambda _: "")
+    assert login == "админ" and password                  # русский логин можно
+    assert any("оборванный символ" in s for s in said) and any("пробелов" in s for s in said)

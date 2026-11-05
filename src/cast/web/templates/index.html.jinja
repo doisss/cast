@@ -41,22 +41,18 @@
         <button class="btn small-btn hidden" type="button" id="fm-reopen">Показать файлы</button>
         <button class="btn ghost small-btn" type="button" id="disc-refresh" title="Найти заново">↻ Обновить список</button>
       </div>
-      <p class="muted small" style="margin:.3rem 0 0">Нажмите на то, что хотите проверить, и проверка сразу начнётся.
-        Здесь всё, что cast нашёл на этой машине{% if not is_root %} (веб запущен без root, поэтому Docker-хост и контейнеры недоступны){% endif %}.</p>
-      <div id="disc"><p class="muted">Ищу, что можно проверить…</p></div>
-
-      <details class="manual">
-        <summary>Вписать цель вручную, как в консоли</summary>
-        <form method="post" action="/jobs" id="scan-form" style="margin-top:.6rem">
-          <input type="hidden" name="token" value="{{ token }}">
-          <div class="row" style="flex-wrap:nowrap">
-            <input type="text" name="target" id="target" autocomplete="off"
-                   placeholder="alpine:3.19, /путь/к/Dockerfile, https://github.com/…">
-            <button class="btn primary" type="submit">Проверить</button>
-          </div>
-          <p class="muted small" style="margin:.4rem 0 0"><code>cast scan ЦЕЛЬ</code>: что это за цель, cast поймёт сам.
-            Путь без «/» в начале считается от папки, где запущен cast web: <code>{{ cwd }}</code>.</p>
-          <p class="small muted" style="margin:.8rem 0 .3rem">Движки (ничего не выбрано — cast выберет сам)</p>
+      <form method="post" action="/jobs" id="scan-form" class="manual">
+        <input type="hidden" name="token" value="{{ token }}">
+        <div class="row" style="flex-wrap:nowrap">
+          <input type="text" name="target" id="target" autocomplete="off"
+                 placeholder="Цель, как в консоли: alpine:3.19, /путь/к/Dockerfile, ссылка на git">
+          <button class="btn primary" type="submit">Проверить</button>
+        </div>
+        <p class="muted small" style="margin:.4rem 0 0"><code>cast scan ЦЕЛЬ</code>: что это за цель, cast поймёт сам.
+          Путь без «/» в начале считается от папки, где запущен cast web: <code>{{ cwd }}</code>.</p>
+        <details class="manual-more">
+          <summary>Движки и requirements.txt</summary>
+          <p class="small muted" style="margin:.6rem 0 .3rem">Движки (ничего не выбрано — cast выберет сам)</p>
           <div class="row">
             {% for e in engines %}
             <label class="chip"><input type="checkbox" name="engine" value="{{ e.name }}"
@@ -65,8 +61,11 @@
           </div>
           <p class="small muted" style="margin:.8rem 0 .3rem">requirements.txt для приоритета (путь на этой машине)</p>
           <input type="text" name="requirements" placeholder="/путь/к/requirements.txt">
-        </form>
-      </details>
+        </details>
+      </form>
+      <p class="muted small found-note">Или нажмите на то, что cast нашёл на этой машине, и проверка сразу начнётся{% if not is_root %}
+        (веб запущен без root, поэтому Docker-хост и контейнеры недоступны){% endif %}.</p>
+      <div id="disc"><p class="muted">Ищу, что можно проверить…</p></div>
     </div>
   </div>
 
@@ -499,7 +498,7 @@ function renderDisc(d) {
     : `<div class="mod"><div class="mod-head"><h3>Kubernetes</h3></div><p class="muted small">kubeconfig не найден (~/.kube/config) — кластер проверить не получится.</p></div>`;
   for (const [key, title, about] of GROUPS) html += block(key, title, about, (f[key] || []).map(fileItem));
   html += block("repo", "Git-репозиторий по ссылке", "Trivy скачает его сам",
-    [item("https://github.com/aquasecurity/trivy-ci-test", "github.com/aquasecurity/trivy-ci-test", "пример; свою ссылку — «Вписать цель вручную»")]);
+    [item("https://github.com/aquasecurity/trivy-ci-test", "github.com/aquasecurity/trivy-ci-test", "пример; свою ссылку — в поле наверху")]);
   html += `</div><p class="muted small" style="margin:.8rem 0 0">Файлы искал в ${(d.roots || []).map(r => `<code>${esc(short(r))}</code>`).join(" и ")}` +
     ` за ${d.seconds} с${d.cut ? " (папок слишком много — обошёл не всё)" : ""}. Остальное — в проводнике слева.</p>`;
   $("disc").innerHTML = html;

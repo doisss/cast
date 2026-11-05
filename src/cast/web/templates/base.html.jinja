@@ -144,8 +144,7 @@
                                .layout > .side-right > .card { margin: 0; }
                                .layout.fm-closed { grid-template-columns: 1fr; } }
   .layout > * { min-width: 0; }
-  @media (max-width: 900px) { .layout, .layout.fm-closed { grid-template-columns: 1fr; }
-                              .fm { position: static; height: 70vh; } }
+  @media (max-width: 900px) { .layout, .layout.fm-closed { grid-template-columns: 1fr; } }
   @media (max-width: 560px) { .fm-head, .fm-row { grid-template-columns: minmax(0, 1fr) 5rem 4rem; }
                               .fm-head button:nth-child(2), .fm-row .dt { display: none; } }
   .wrap { overflow-wrap: anywhere; }
@@ -156,6 +155,8 @@
   /* проводник */
   .fm { position: sticky; top: 1rem; display: flex; flex-direction: column; padding: .8rem .9rem;
         height: calc(100vh - 6rem); min-height: 420px; }
+  /* узкое окно: проводник над карточкой, не «прилипает» к верху (правило — после .fm) */
+  @media (max-width: 900px) { .fm { position: static; height: 70vh; } }
   .fm-top { display: flex; align-items: center; gap: .35rem; }
   .fm-nav { display: flex; align-items: center; gap: .25rem; margin: .5rem 0 .4rem; }
   .nav-btn { width: 30px; height: 30px; border: 0; border-radius: 6px; background: transparent; color: var(--text);
@@ -225,7 +226,13 @@
   .t-title { font-weight: 600; font-size: .88rem; overflow-wrap: anywhere; }
   .t-sub { color: var(--muted); font-size: .76rem; overflow-wrap: anywhere; }
   .link-btn { border: 0; background: none; color: var(--accent); font: inherit; font-size: .82rem; padding: .35rem 0 0; cursor: pointer; }
-  details.manual { margin-top: 1.1rem; border-top: 1px solid var(--line); padding-top: .8rem; }
+  /* пакеты одной CVE с разными версиями: версия — напротив своих пакетов */
+  .pv { display: grid; grid-template-columns: minmax(0, 1fr) 10.3rem; column-gap: 1.2rem; row-gap: .45rem; }
+  .pv > div:nth-child(odd) { min-width: 0; }
+  .manual { margin-top: .9rem; }
+  details.manual-more { margin-top: .5rem; }
+  details.manual-more > summary { cursor: pointer; color: var(--muted); font-size: .85rem; }
+  .found-note { margin: 1.1rem 0 0; border-top: 1px solid var(--line); padding-top: .8rem; }
   /* результат: строка фильтров, переключатель кода, группы кластера */
   .toolbar { margin-bottom: .2rem; }
   .search { max-width: 300px; padding: .4rem .7rem !important; font-size: .88rem !important; }
